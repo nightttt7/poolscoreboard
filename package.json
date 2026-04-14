@@ -1,0 +1,33 @@
+{
+  "name": "hono-github-cloudflare-template",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "sync:project": "node scripts/sync-project.mjs",
+    "postinstall": "npm run sync:project",
+    "dev": "npm run sync:project && node scripts/run-wrangler-dev.mjs",
+    "deploy": "npm run sync:project && wrangler deploy",
+    "test": "npm run sync:project && vitest run",
+    "test:watch": "npm run sync:project && vitest",
+    "typecheck": "npm run sync:project && tsc --noEmit",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate:local": "npm run sync:project && wrangler d1 migrations apply DB --local",
+    "db:migrate:remote": "npm run sync:project && wrangler d1 migrations apply DB --remote",
+    "db:reset:local": "npm run sync:project && node scripts/reset-local-db.mjs && wrangler d1 migrations apply DB --local",
+    "db:ensure:remote": "node scripts/ensure-remote-d1.mjs",
+    "cf:typegen": "npm run sync:project && wrangler types"
+  },
+  "dependencies": {
+    "drizzle-orm": "^0.44.0",
+    "hono": "^4.9.6"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.8.61",
+    "@cloudflare/workers-types": "^4.20260410.0",
+    "drizzle-kit": "^0.31.6",
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.4",
+    "wrangler": "^4.11.1"
+  }
+}
