@@ -328,7 +328,7 @@ async function ensureCurrentMatch(c: AppContext) {
     return {
       user,
       context: null,
-      response: c.json({ error: "管理员账号不能操作比赛" }, 403),
+      response: c.json({ error: "管理员账号不能参与比赛" }, 403),
     };
   }
 
