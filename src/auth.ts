@@ -16,7 +16,7 @@ const encoder = new TextEncoder();
 const SESSION_COOKIE_NAME = "session";
 const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 30;
 const ADMIN_USERNAME = "admin";
-const PASSWORD_HASH_ITERATIONS = 4000;
+const PASSWORD_HASH_ITERATIONS = 600_000;
 
 function bytesToHex(bytes: Uint8Array) {
   return Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("");
@@ -101,13 +101,13 @@ async function ensureAdminUser(c: AppContext) {
   const insertedId = Number(insertResult.meta?.last_row_id);
 
   if (!Number.isInteger(insertedId) || insertedId <= 0) {
-    throw new Error("unable to create admin user");
+    throw new Error("Failed to retrieve valid ID for newly created admin user");
   }
 
   const adminUser = await db.select().from(users).where(eq(users.id, insertedId)).get();
 
   if (!adminUser) {
-    throw new Error("unable to create admin user");
+    throw new Error("Unable to load newly created admin user");
   }
 
   return adminUser;

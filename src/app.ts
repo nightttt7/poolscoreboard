@@ -328,7 +328,7 @@ async function ensureCurrentMatch(c: AppContext) {
     return {
       user,
       context: null,
-      response: c.json({ error: "管理员账号不能参与比赛" }, 403),
+      response: adminMatchBlockedResponse(c),
     };
   }
 
@@ -388,6 +388,10 @@ function serializeUser(user: User | null) {
       isAdmin: isAdminUser(user),
     }
     : null;
+}
+
+function adminMatchBlockedResponse(c: AppContext) {
+  return c.json({ error: "管理员账号不能参与比赛" }, 403);
 }
 
 async function respondWithCurrentState(c: AppContext, user: User) {
@@ -1035,7 +1039,7 @@ app.post("/api/matches", async (c) => {
   const currentUser = await getAuthenticatedUser(c);
 
   if (isAdminUser(currentUser)) {
-    return c.json({ error: "管理员账号不能参与比赛" }, 403);
+    return adminMatchBlockedResponse(c);
   }
 
   const user = await upsertSessionUser(c, name);
@@ -1102,7 +1106,7 @@ app.post("/api/matches/join", async (c) => {
   const currentUser = await getAuthenticatedUser(c);
 
   if (isAdminUser(currentUser)) {
-    return c.json({ error: "管理员账号不能参与比赛" }, 403);
+    return adminMatchBlockedResponse(c);
   }
 
   const user = await upsertSessionUser(c, name);
