@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 const requiredEnvVars = ["CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID", "ADMIN_PASSWORD"];
 const missingEnvVars = requiredEnvVars.filter((name) => !process.env[name]);
@@ -10,8 +11,9 @@ if (missingEnvVars.length > 0) {
   process.exit(1);
 }
 
-const command = process.platform === "win32" ? "npx.cmd" : "npx";
-const args = ["wrangler", "dev", ...process.argv.slice(2)];
+const wranglerCliPath = fileURLToPath(new URL("../node_modules/wrangler/bin/wrangler.js", import.meta.url));
+const command = process.execPath;
+const args = [wranglerCliPath, "dev", ...process.argv.slice(2)];
 
 const child = spawn(command, args, {
   stdio: "inherit",
