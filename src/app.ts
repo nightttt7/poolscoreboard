@@ -3,12 +3,13 @@ import { drizzle } from "drizzle-orm/d1";
 import type { Context } from "hono";
 import { Hono } from "hono";
 
-import { clearSession, getAuthenticatedUser, upsertSessionUser } from "./auth";
+import { clearSession, getAuthenticatedUser, isAdminUser, loginAdmin, upsertSessionUser } from "./auth";
 import { frames, matches, users, type Frame, type Match, type User } from "./db/schema";
 import { PROJECT_NAME, WORKER_NAME } from "./project";
 
 type Bindings = {
   DB: D1Database;
+  ADMIN_PASSWORD: string;
 };
 
 type AppContext = Context<{ Bindings: Bindings }>;
@@ -323,6 +324,14 @@ async function ensureCurrentMatch(c: AppContext) {
     };
   }
 
+  if (isAdminUser(user)) {
+    return {
+      user,
+      context: null,
+      response: c.json({ error: "管理员账号不能操作比赛" }, 403),
+    };
+  }
+
   const context = await loadCurrentMatchContext(c, user);
 
   if (!context) {
@@ -376,6 +385,7 @@ function serializeUser(user: User | null) {
   return user
     ? {
       name: user.name,
+      isAdmin: isAdminUser(user),
     }
     : null;
 }
@@ -599,7 +609,7 @@ function renderHomePage() {
       <section class="panel hero">
         <span class="badge">手机优先 · 双人台球计分板</span>
         <h1>${PROJECT_NAME}</h1>
-        <p>输入名字即可开始。数据库会记录比赛、局数、犯规和当前所在比赛，身份通过 Cookie 会话校验。</p>
+        <p>玩家输入名字即可开始；同时保留一个 Admin 登录入口，供后续管理功能使用。数据库会记录比赛、局数、犯规和当前所在比赛，身份通过 Cookie 会话校验。</p>
       </section>
       <section class="panel">
         <div class="status" id="status">正在连接…</div>
@@ -614,6 +624,14 @@ function renderHomePage() {
 
       function setStatus(message) {
         statusNode.textContent = message;
+      }
+
+      function readyStatus() {
+        if (state.match) {
+          return "已同步比赛状态。";
+        }
+
+        return state.user && state.user.isAdmin ? "已登录管理员账号。" : "准备开始新的比赛。";
       }
 
       function make(tag, options = {}) {
@@ -670,7 +688,7 @@ function renderHomePage() {
           const payload = await task();
           applyPayload(payload || {});
           render();
-          setStatus(state.match ? "已同步比赛状态。" : "准备开始新的比赛。");
+          setStatus(readyStatus());
         } catch (error) {
           setStatus(error instanceof Error ? error.message : "发生未知错误");
         } finally {
@@ -762,7 +780,50 @@ function renderHomePage() {
         });
         joinCard.append(codeField, joinButton);
 
-        container.append(intro, nameField, createButton, joinCard);
+        const adminCard = make("div", { className: "frame-card" });
+        adminCard.append(
+          make("h2", { text: "Admin 登录" }),
+          make("p", { text: "保留账号 admin，后续需要管理功能时可直接使用。" })
+        );
+        const adminPasswordField = make("label", { className: "field" });
+        adminPasswordField.append(
+          make("span", { text: "管理员密码" }),
+          make("input", {
+            type: "password",
+            placeholder: "输入 ADMIN_PASSWORD"
+          })
+        );
+        const adminPasswordInput = adminPasswordField.querySelector("input");
+        const adminLoginButton = make("button", { className: "ghost", text: "Admin 登录" });
+        adminLoginButton.addEventListener("click", () => {
+          runAction("正在登录管理员…", () => api("/api/admin/session", {
+            method: "POST",
+            body: JSON.stringify({ password: adminPasswordInput.value })
+          }));
+        });
+        adminCard.append(adminPasswordField, adminLoginButton);
+
+        container.append(intro, nameField, createButton, joinCard, adminCard);
+        shell.append(container);
+      }
+
+      function renderAdminHome() {
+        shell.replaceChildren();
+        const container = make("div", { className: "match-stack" });
+        const card = make("div", { className: "frame-card" });
+        card.append(
+          make("h2", { text: "Admin 已登录" }),
+          make("p", { text: "当前保留的是管理员账号 admin。普通比赛仍使用玩家名字 + Cookie 会话。" })
+        );
+        const logoutButton = make("button", { className: "ghost", text: "退出 Admin" });
+        logoutButton.addEventListener("click", () => {
+          runAction("正在退出管理员…", async () => {
+            await api("/api/session", { method: "DELETE" });
+            return { user: null, match: null };
+          });
+        });
+        card.append(logoutButton);
+        container.append(card);
         shell.append(container);
       }
 
@@ -882,7 +943,9 @@ function renderHomePage() {
       }
 
       function render() {
-        if (state.match) {
+        if (state.user && state.user.isAdmin) {
+          renderAdminHome();
+        } else if (state.match) {
           renderMatch();
         } else {
           renderLobby();
@@ -893,7 +956,12 @@ function renderHomePage() {
         const payload = await api("/api/session");
         applyPayload(payload);
         render();
-        setStatus(state.match ? "已恢复进行中的比赛。" : "准备开始新的比赛。");
+        if (state.match) {
+          setStatus("已恢复进行中的比赛。");
+          return;
+        }
+
+        setStatus(state.user && state.user.isAdmin ? "已登录管理员账号。" : "准备开始新的比赛。");
       }
 
       loadSession().catch((error) => {
@@ -922,6 +990,39 @@ app.get("/api/session", async (c) => {
   return c.json({ user: serializeUser(user), match: matchState });
 });
 
+app.post("/api/admin/session", async (c) => {
+  const currentUser = await getAuthenticatedUser(c);
+
+  if (currentUser) {
+    if (isAdminUser(currentUser)) {
+      return c.json({ user: serializeUser(currentUser), match: null });
+    }
+
+    const currentContext = await loadCurrentMatchContext(c, currentUser);
+
+    if (currentContext) {
+      return c.json({ error: "请先退出当前比赛后再使用管理员登录" }, 409);
+    }
+
+    await clearSession(c);
+  }
+
+  const payload = await readJson<{ password?: unknown }>(c);
+  const password = typeof payload?.password === "string" ? payload.password : "";
+
+  if (!password) {
+    return c.json({ error: "管理员密码必填" }, 400);
+  }
+
+  const adminUser = await loginAdmin(c, password);
+
+  if (!adminUser) {
+    return c.json({ error: "管理员密码错误" }, 401);
+  }
+
+  return c.json({ user: serializeUser(adminUser), match: null });
+});
+
 app.post("/api/matches", async (c) => {
   await cleanupStaleMatches(c);
   const payload = await readJson<{ name?: unknown }>(c);
@@ -929,6 +1030,12 @@ app.post("/api/matches", async (c) => {
 
   if (!name) {
     return c.json({ error: `名字必填，且不能超过 ${MAX_NAME_LENGTH} 个字符` }, 400);
+  }
+
+  const currentUser = await getAuthenticatedUser(c);
+
+  if (isAdminUser(currentUser)) {
+    return c.json({ error: "管理员账号不能参与比赛" }, 403);
   }
 
   const user = await upsertSessionUser(c, name);
@@ -990,6 +1097,12 @@ app.post("/api/matches/join", async (c) => {
 
   if (!code) {
     return c.json({ error: "比赛编号格式不正确" }, 400);
+  }
+
+  const currentUser = await getAuthenticatedUser(c);
+
+  if (isAdminUser(currentUser)) {
+    return c.json({ error: "管理员账号不能参与比赛" }, 403);
   }
 
   const user = await upsertSessionUser(c, name);

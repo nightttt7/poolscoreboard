@@ -4,6 +4,9 @@ export const users = sqliteTable("users", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   name: text("name").notNull(),
   currentMatchId: text("current_match_id"),
+  username: text("username"),
+  passwordSalt: text("password_salt"),
+  passwordHash: text("password_hash"),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
   updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
 });
