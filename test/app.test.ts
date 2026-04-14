@@ -50,6 +50,7 @@ describe("pool scoreboard app", () => {
     expect(html).toContain("双人台球计分板");
     expect(html).toContain("开启新比赛");
     expect(html).toContain("Admin 登录");
+    expect(html).toContain("grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));");
   });
 
   it("requires a cookie-backed session before mutating match data", async () => {

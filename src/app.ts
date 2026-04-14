@@ -566,9 +566,14 @@ function renderHomePage() {
         align-items: center;
         gap: 12px;
       }
-      .winner-row, .foul-grid {
+      .winner-row {
         display: grid;
         grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+      }
+      .foul-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
         gap: 10px;
       }
       .win-button {
