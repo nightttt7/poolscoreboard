@@ -15,7 +15,7 @@
    - `CLOUDFLARE_ACCOUNT_ID`
    - `ADMIN_PASSWORD`
 
-> 这个仓库仍沿用模板的部署凭据约定，避免本地和 GitHub Actions 各走一套配置；其中 `ADMIN_PASSWORD` 会同步到保留的 `admin` 账号，并作为页面上的 Admin 登录入口密码。
+> 本地开发和 GitHub Actions 共用同一组凭据；其中 `ADMIN_PASSWORD` 会同步到保留的 `admin` 账号，并作为页面上的 Admin 登录入口密码。
 
 ## 当前产品行为
 
@@ -52,4 +52,4 @@ npm run typecheck
 
 ## 部署
 
-用户把改动推送到 `main` 后，现有 GitHub Actions 会继续执行：安装依赖、同步项目名、跑 typecheck / test、执行远程 migration、再部署 Worker。
+用户把改动推送到 `main` 后，现有 GitHub Actions 会继续执行：安装依赖、跑 typecheck / test、执行远程 migration、同步 `ADMIN_PASSWORD`、再部署 Worker。

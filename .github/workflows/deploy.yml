@@ -14,10 +14,10 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     env:
-      PROJECT_NAME: ${{ github.event.repository.name }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
+      WORKER_NAME: poolscoreboard
 
     steps:
       - name: Checkout
@@ -45,9 +45,6 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Sync project naming
-        run: npm run sync:project
-
       - name: Typecheck
         run: npm run typecheck
 
@@ -57,11 +54,8 @@ jobs:
       - name: Ensure remote D1 exists
         run: npm run db:ensure:remote
 
-      - name: Rebuild project config with remote D1 id
-        run: npm run sync:project
-
       - name: Upload worker admin password secret
-        run: printf '%s' "$ADMIN_PASSWORD" | npx wrangler secret put ADMIN_PASSWORD --name "$PROJECT_NAME"
+        run: printf '%s' "$ADMIN_PASSWORD" | npx wrangler secret put ADMIN_PASSWORD --name "$WORKER_NAME"
 
       - name: Apply D1 migrations
         run: npm run db:migrate:remote

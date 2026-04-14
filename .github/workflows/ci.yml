@@ -9,8 +9,6 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    env:
-      PROJECT_NAME: ${{ github.event.repository.name }}
 
     steps:
       - name: Checkout
@@ -24,9 +22,6 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
-
-      - name: Sync project naming
-        run: npm run sync:project
 
       - name: Typecheck
         run: npm run typecheck

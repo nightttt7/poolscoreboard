@@ -5,7 +5,7 @@ const missingEnvVars = requiredEnvVars.filter((name) => !process.env[name]);
 
 if (missingEnvVars.length > 0) {
   console.error(
-    `Missing required environment variables for local dev: ${missingEnvVars.join(", ")}. This template keeps local and GitHub configuration aligned around the same three variables; configure them as persistent local environment variables and see README.md.`,
+    `Missing required environment variables for local dev: ${missingEnvVars.join(", ")}. Configure them as persistent local environment variables and see README.md.`,
   );
   process.exit(1);
 }

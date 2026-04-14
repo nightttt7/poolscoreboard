@@ -5,7 +5,6 @@ import { Hono } from "hono";
 
 import { clearSession, getAuthenticatedUser, isAdminUser, loginAdmin, upsertSessionUser } from "./auth";
 import { frames, matches, users, type Frame, type Match, type User } from "./db/schema";
-import { PROJECT_NAME, WORKER_NAME } from "./project";
 
 type Bindings = {
   DB: D1Database;
@@ -38,6 +37,7 @@ type MatchState = {
 };
 
 const app = new Hono<{ Bindings: Bindings }>();
+const PROJECT_NAME = "poolscoreboard";
 const DEFAULT_TARGET_WINS = 7;
 const MAX_NAME_LENGTH = 24;
 const MAX_TARGET_WINS = 99;
@@ -624,7 +624,7 @@ function renderHomePage() {
         <div class="status" id="status">正在连接…</div>
       </section>
       <section class="panel" id="app-shell"></section>
-      <p class="footer-note">Worker: ${WORKER_NAME}</p>
+      <p class="footer-note">Worker: ${PROJECT_NAME}</p>
     </main>
     <script>
       const shell = document.getElementById("app-shell");
@@ -984,7 +984,7 @@ function renderHomePage() {
 
 app.get("/", (c) => c.html(renderHomePage()));
 
-app.get("/health", (c) => c.json({ ok: true, projectName: PROJECT_NAME, workerName: WORKER_NAME }));
+app.get("/health", (c) => c.json({ ok: true, projectName: PROJECT_NAME, workerName: PROJECT_NAME }));
 
 app.get("/api/session", async (c) => {
   await cleanupStaleMatches(c);

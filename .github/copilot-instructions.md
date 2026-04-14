@@ -1,12 +1,11 @@
 # Repository Copilot Instructions
 
-- Treat this repository as a reusable template for fast prototypes on Hono + Cloudflare Workers + D1.
-- The project name is the single naming source: repo name, folder name, package name, worker name, and workers.dev subdomain should all be `[project-name]`; the D1 name should be `[project-name]-prod`.
-- Before changing naming-sensitive files, run or preserve the `sync:project` workflow. Do not hardcode a second competing naming scheme.
+- Treat this repository as the standalone poolscoreboard application built on Hono + Cloudflare Workers + D1.
+- Keep project naming explicit and stable: package name and worker name are `poolscoreboard`; the D1 database name is `poolscoreboard-prod`.
 - All write operations against app data must remain behind database-backed authentication. Do not re-open public write access to D1-backed routes unless the user explicitly asks for it.
 - The initial admin account is `admin`; its initial password comes from the `ADMIN_PASSWORD` Worker secret and local shell environment variables. Do not replace this with a hardcoded password in source.
 - Keep the admin bootstrap simple: lazily create the `admin` user during login instead of adding separate migration bootstrap scripts unless the user explicitly asks for them.
-- When changing schema, auth, deployment, or template usage, update the relevant instruction files in the same change. Instructions in this repo are expected to evolve continuously with the project.
+- When changing schema, auth, deployment, or project workflow, update the relevant instruction files in the same change. Instructions in this repo are expected to evolve continuously with the project.
 - Keep README short and human-focused. Put the most emphasis on steps AI cannot complete automatically, especially GitHub secrets, Cloudflare credentials, and local secret files.
 
 # Philosophy

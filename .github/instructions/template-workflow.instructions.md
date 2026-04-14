@@ -1,17 +1,15 @@
 ---
 applyTo: '**'
-description: Template workflow, naming, deployment, and operator-boundary rules for this Hono + Cloudflare prototype template.
+description: Project workflow, naming, deployment, and operator-boundary rules for poolscoreboard.
 ---
 
-## Template Workflow
+## Project Workflow
 
-- This repository is meant to be marked as a GitHub Template Repository and instantiated into new standalone repos.
-- Assume the new repo name is the intended project name unless the user explicitly overrides it.
+- Treat this repository as the standalone `poolscoreboard` service, not as a reusable template.
 - Preserve the naming convention:
-  - Worker name: `[project-name]`
-  - D1 database name: `[project-name]-prod`
-  - workers.dev URL: `https://[project-name].<workers-dev-subdomain>.workers.dev`
-- When editing config or scripts related to naming, keep `npm run sync:project` as the source-of-truth sync mechanism.
+  - Worker name: `poolscoreboard`
+  - D1 database name: `poolscoreboard-prod`
+- Keep naming-sensitive configuration explicit in source files instead of regenerating it from helper scripts.
 
 ## Deployment Reality
 

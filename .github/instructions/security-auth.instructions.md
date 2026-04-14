@@ -1,6 +1,6 @@
 ---
 applyTo: 'src/**,migrations/**,.github/workflows/**,README.md'
-description: Security and auth rules for the template's D1-backed application and deployment flow.
+description: Security and auth rules for poolscoreboard's D1-backed application and deployment flow.
 ---
 
 ## Auth Baseline

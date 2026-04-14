@@ -4,19 +4,17 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "sync:project": "node scripts/sync-project.mjs",
-    "postinstall": "npm run sync:project",
-    "dev": "npm run sync:project && node scripts/run-wrangler-dev.mjs",
-    "deploy": "npm run sync:project && wrangler deploy",
-    "test": "npm run sync:project && vitest run",
-    "test:watch": "npm run sync:project && vitest",
-    "typecheck": "npm run sync:project && tsc --noEmit",
+    "dev": "node scripts/run-wrangler-dev.mjs",
+    "deploy": "wrangler deploy",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
     "db:generate": "drizzle-kit generate",
-    "db:migrate:local": "npm run sync:project && wrangler d1 migrations apply DB --local",
-    "db:migrate:remote": "npm run sync:project && wrangler d1 migrations apply DB --remote",
-    "db:reset:local": "npm run sync:project && node scripts/reset-local-db.mjs && wrangler d1 migrations apply DB --local",
+    "db:migrate:local": "wrangler d1 migrations apply DB --local",
+    "db:migrate:remote": "wrangler d1 migrations apply DB --remote",
+    "db:reset:local": "node scripts/reset-local-db.mjs && wrangler d1 migrations apply DB --local",
     "db:ensure:remote": "node scripts/ensure-remote-d1.mjs",
-    "cf:typegen": "npm run sync:project && wrangler types"
+    "cf:typegen": "wrangler types"
   },
   "dependencies": {
     "drizzle-orm": "^0.44.0",

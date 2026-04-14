@@ -9,7 +9,6 @@ import { env } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
 
 import app from "../src/app";
-import { PROJECT_NAME } from "../src/project";
 
 async function resetDatabase() {
   await env.DB.exec("DROP TABLE IF EXISTS frames");
@@ -36,6 +35,8 @@ function cookieFrom(response: Response) {
 }
 
 describe("pool scoreboard app", () => {
+  const PROJECT_NAME = "poolscoreboard";
+
   beforeEach(async () => {
     await resetDatabase();
   });
