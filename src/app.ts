@@ -9,7 +9,6 @@ import { PROJECT_NAME, WORKER_NAME } from "./project";
 
 type Bindings = {
   DB: D1Database;
-  ADMIN_PASSWORD?: string;
 };
 
 type AppContext = Context<{ Bindings: Bindings }>;
@@ -97,7 +96,6 @@ function isFrameEmpty(frame: Frame) {
 }
 
 function calculateTotalWins(frameRows: Frame[]) {
-  const wins = { 1: 0, 2: 0 } as const;
   let player1 = 0;
   let player2 = 0;
 
@@ -348,12 +346,13 @@ async function generateMatchCode(c: AppContext) {
 
   for (let digits = 2; digits <= 6; digits += 1) {
     const upperBound = 10 ** digits;
+    const occupiedForDigits = Array.from(existingCodes).filter((code) => code.length === digits).length;
 
-    if (existingCodes.size >= upperBound) {
+    if (occupiedForDigits >= upperBound) {
       continue;
     }
 
-    for (let attempt = 0; attempt < 200; attempt += 1) {
+    for (let attempt = 0; attempt < 50; attempt += 1) {
       const candidate = String(Math.floor(Math.random() * upperBound)).padStart(digits, "0");
 
       if (!existingCodes.has(candidate)) {

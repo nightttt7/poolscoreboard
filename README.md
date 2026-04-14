@@ -15,7 +15,7 @@
    - `CLOUDFLARE_ACCOUNT_ID`
    - `ADMIN_PASSWORD`
 
-> 这个仓库仍沿用模板的部署凭据约定，避免本地和 GitHub Actions 各走一套配置。
+> 这个仓库仍沿用模板的部署凭据约定，避免本地和 GitHub Actions 各走一套配置；其中 `ADMIN_PASSWORD` 仅为保留模板 deploy 流程兼容性，不用于当前计分板的人机交互。
 
 ## 当前产品行为
 
