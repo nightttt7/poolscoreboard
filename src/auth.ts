@@ -5,19 +5,15 @@ import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 
 import { sessions, users } from "./db/schema";
 
-export const ADMIN_USERNAME = "admin";
-
-const encoder = new TextEncoder();
-const SESSION_COOKIE_NAME = "session";
-const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 7;
-const PASSWORD_HASH_ITERATIONS = 4000;
-
 type Bindings = {
   DB: D1Database;
-  ADMIN_PASSWORD: string;
 };
 
 type AppContext = Context<{ Bindings: Bindings }>;
+
+const encoder = new TextEncoder();
+const SESSION_COOKIE_NAME = "session";
+const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 30;
 
 function bytesToHex(bytes: Uint8Array) {
   return Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("");
@@ -33,45 +29,31 @@ async function sha256Hex(value: string) {
   return bytesToHex(new Uint8Array(digest));
 }
 
-async function hashPassword(password: string, salt: string) {
-  const key = await crypto.subtle.importKey("raw", encoder.encode(password), "PBKDF2", false, ["deriveBits"]);
-  const derived = await crypto.subtle.deriveBits(
-    {
-      name: "PBKDF2",
-      hash: "SHA-256",
-      salt: encoder.encode(salt),
-      iterations: PASSWORD_HASH_ITERATIONS,
-    },
-    key,
-    256,
-  );
-
-  return bytesToHex(new Uint8Array(derived));
-}
-
 function getDatabase(c: AppContext) {
   return drizzle(c.env.DB);
 }
 
-export async function ensureAdminUser(c: AppContext) {
+async function createSession(c: AppContext, userId: number) {
   const db = getDatabase(c);
-  const existingAdmin = await db.select().from(users).where(eq(users.username, ADMIN_USERNAME)).get();
+  const sessionToken = randomHex(32);
+  const tokenHash = await sha256Hex(sessionToken);
+  const expiresAt = new Date(Date.now() + SESSION_TTL_MS);
 
-  if (existingAdmin) {
-    return existingAdmin;
-  }
-
-  const passwordSalt = randomHex(16);
-  const passwordHash = await hashPassword(c.env.ADMIN_PASSWORD, passwordSalt);
-
-  await db.insert(users).values({
-    username: ADMIN_USERNAME,
-    passwordSalt,
-    passwordHash,
+  await db.insert(sessions).values({
+    id: crypto.randomUUID(),
+    userId,
+    tokenHash,
+    expiresAt,
     createdAt: new Date(),
   });
 
-  return db.select().from(users).where(eq(users.username, ADMIN_USERNAME)).get();
+  setCookie(c, SESSION_COOKIE_NAME, sessionToken, {
+    httpOnly: true,
+    sameSite: "Lax",
+    secure: new URL(c.req.url).protocol === "https:",
+    path: "/",
+    expires: expiresAt,
+  });
 }
 
 export async function getAuthenticatedUser(c: AppContext) {
@@ -104,46 +86,51 @@ export async function getAuthenticatedUser(c: AppContext) {
   return user;
 }
 
-export async function login(c: AppContext, username: string, password: string) {
-  await ensureAdminUser(c);
-
+export async function upsertSessionUser(c: AppContext, name: string) {
   const db = getDatabase(c);
-  const user = await db.select().from(users).where(eq(users.username, username)).get();
+  const now = new Date();
+  const existingUser = await getAuthenticatedUser(c);
+
+  if (existingUser) {
+    await db
+      .update(users)
+      .set({
+        name,
+        updatedAt: now,
+      })
+      .where(eq(users.id, existingUser.id));
+
+    return {
+      ...existingUser,
+      name,
+      updatedAt: now,
+    };
+  }
+
+  const insertResult = await db.insert(users).values({
+    name,
+    currentMatchId: null,
+    createdAt: now,
+    updatedAt: now,
+  });
+  const insertedId = Number(insertResult.meta?.last_row_id);
+
+  if (!Number.isInteger(insertedId) || insertedId <= 0) {
+    throw new Error("unable to create user session");
+  }
+
+  await createSession(c, insertedId);
+
+  const user = await db.select().from(users).where(eq(users.id, insertedId)).get();
 
   if (!user) {
-    return null;
+    throw new Error("unable to create user session");
   }
-
-  const passwordHash = await hashPassword(password, user.passwordSalt);
-
-  if (passwordHash !== user.passwordHash) {
-    return null;
-  }
-
-  const sessionToken = randomHex(32);
-  const tokenHash = await sha256Hex(sessionToken);
-  const expiresAt = new Date(Date.now() + SESSION_TTL_MS);
-
-  await db.insert(sessions).values({
-    id: crypto.randomUUID(),
-    userId: user.id,
-    tokenHash,
-    expiresAt,
-    createdAt: new Date(),
-  });
-
-  setCookie(c, SESSION_COOKIE_NAME, sessionToken, {
-    httpOnly: true,
-    sameSite: "Lax",
-    secure: new URL(c.req.url).protocol === "https:",
-    path: "/",
-    expires: expiresAt,
-  });
 
   return user;
 }
 
-export async function logout(c: AppContext) {
+export async function clearSession(c: AppContext) {
   const db = getDatabase(c);
   const sessionToken = getCookie(c, SESSION_COOKIE_NAME);
 

@@ -8,6 +8,7 @@ description: Security and auth rules for the template's D1-backed application an
 - Data-changing routes must require authenticated sessions.
 - Prefer also protecting data-reading routes when the data is prototype-private, unless the user explicitly asks for public reads.
 - Keep auth database-backed and extensible. Do not replace it with hardcoded in-memory credentials.
+- For the pool scoreboard UI, players identify with a display name plus a D1-backed cookie session; do not switch gameplay back to unsigned client-only state.
 
 ## Initial Admin Rules
 

@@ -1,34 +1,396 @@
-import { asc, eq } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, lt, or } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import type { Context } from "hono";
 import { Hono } from "hono";
 
-import { ADMIN_USERNAME, getAuthenticatedUser, login, logout } from "./auth";
-import { todos } from "./db/schema";
-import { D1_DATABASE_NAME, PROJECT_NAME, WORKER_NAME } from "./project";
+import { clearSession, getAuthenticatedUser, upsertSessionUser } from "./auth";
+import { frames, matches, users, type Frame, type Match, type User } from "./db/schema";
+import { PROJECT_NAME, WORKER_NAME } from "./project";
 
 type Bindings = {
   DB: D1Database;
-  ADMIN_PASSWORD: string;
 };
 
 type AppContext = Context<{ Bindings: Bindings }>;
 
-const app = new Hono<{ Bindings: Bindings }>();
+type MatchState = {
+  code: string;
+  targetWins: number;
+  players: Array<{
+    slot: 1 | 2;
+    name: string | null;
+    occupied: boolean;
+    isSelf: boolean;
+  }>;
+  frames: Array<{
+    number: number;
+    winnerSlot: 1 | 2 | null;
+    player1Fouls: number;
+    player2Fouls: number;
+  }>;
+  totalWins: {
+    1: number;
+    2: number;
+  };
+  winnerSlot: 1 | 2 | null;
+  winnerMessage: string | null;
+};
 
-async function requireUser(c: AppContext) {
+const app = new Hono<{ Bindings: Bindings }>();
+const DEFAULT_TARGET_WINS = 7;
+const MAX_NAME_LENGTH = 24;
+const MAX_TARGET_WINS = 99;
+const MAX_FOULS = 99;
+const MATCH_IDLE_TTL_MS = 1000 * 60 * 60 * 6;
+
+function getDatabase(c: AppContext) {
+  return drizzle(c.env.DB);
+}
+
+function normalizeName(value: unknown) {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const trimmed = value.trim();
+
+  if (!trimmed || trimmed.length > MAX_NAME_LENGTH) {
+    return null;
+  }
+
+  return trimmed;
+}
+
+function normalizeCode(value: unknown) {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  return /^\d{2,}$/.test(trimmed) ? trimmed : null;
+}
+
+function parseInteger(value: unknown) {
+  if (typeof value === "number" && Number.isInteger(value)) {
+    return value;
+  }
+
+  if (typeof value === "string" && /^-?\d+$/.test(value.trim())) {
+    return Number(value.trim());
+  }
+
+  return null;
+}
+
+function clamp(value: number, minimum: number, maximum: number) {
+  return Math.min(maximum, Math.max(minimum, value));
+}
+
+function playerName(match: Match, slot: 1 | 2) {
+  const name = slot === 1 ? match.player1Name : match.player2Name;
+  return name || `玩家${slot}`;
+}
+
+function isFrameEmpty(frame: Frame) {
+  return frame.winnerSlot == null && frame.player1Fouls === 0 && frame.player2Fouls === 0;
+}
+
+function calculateTotalWins(frameRows: Frame[]) {
+  let player1 = 0;
+  let player2 = 0;
+
+  for (const frame of frameRows) {
+    if (frame.winnerSlot === 1) {
+      player1 += 1;
+    } else if (frame.winnerSlot === 2) {
+      player2 += 1;
+    }
+  }
+
+  return {
+    1: player1,
+    2: player2,
+  };
+}
+
+function determineWinnerSlot(match: Match, frameRows: Frame[]) {
+  const totals = calculateTotalWins(frameRows);
+
+  if (totals[1] >= match.targetWins) {
+    return 1 as const;
+  }
+
+  if (totals[2] >= match.targetWins) {
+    return 2 as const;
+  }
+
+  return null;
+}
+
+async function readJson<T>(c: AppContext) {
+  try {
+    return await c.req.json<T>();
+  } catch {
+    return null;
+  }
+}
+
+async function cleanupStaleMatches(c: AppContext) {
+  const db = getDatabase(c);
+  const cutoff = new Date(Date.now() - MATCH_IDLE_TTL_MS);
+  const staleMatches = await db
+    .select({ id: matches.id })
+    .from(matches)
+    .where(
+      or(
+        and(isNull(matches.player1UserId), isNull(matches.player2UserId)),
+        lt(matches.updatedAt, cutoff),
+      ),
+    )
+    .all();
+
+  if (staleMatches.length === 0) {
+    return;
+  }
+
+  const staleIds = staleMatches.map((match) => match.id);
+  const now = new Date();
+
+  await db
+    .update(users)
+    .set({
+      currentMatchId: null,
+      updatedAt: now,
+    })
+    .where(inArray(users.currentMatchId, staleIds));
+
+  await db.delete(frames).where(inArray(frames.matchId, staleIds));
+  await db.delete(matches).where(inArray(matches.id, staleIds));
+}
+
+async function normalizeFrames(c: AppContext, match: Match) {
+  const db = getDatabase(c);
+  const frameRows = await db.select().from(frames).where(eq(frames.matchId, match.id)).orderBy(asc(frames.frameNumber)).all();
+
+  if (frameRows.length === 0) {
+    const now = new Date();
+    await db.insert(frames).values({
+      matchId: match.id,
+      frameNumber: 1,
+      winnerSlot: null,
+      player1Fouls: 0,
+      player2Fouls: 0,
+      createdAt: now,
+      updatedAt: now,
+    });
+    return;
+  }
+
+  let working = frameRows.slice();
+  const winnerSlot = determineWinnerSlot(match, working);
+
+  if (winnerSlot) {
+    while (working.length > 1 && isFrameEmpty(working[working.length - 1]!)) {
+      const removable = working.pop();
+
+      if (removable) {
+        await db.delete(frames).where(eq(frames.id, removable.id));
+      }
+    }
+
+    return;
+  }
+
+  while (
+    working.length > 1
+    && isFrameEmpty(working[working.length - 1]!)
+    && isFrameEmpty(working[working.length - 2]!)
+  ) {
+    const removable = working.pop();
+
+    if (removable) {
+      await db.delete(frames).where(eq(frames.id, removable.id));
+    }
+  }
+
+  const lastFrame = working[working.length - 1]!;
+
+  if (lastFrame.winnerSlot != null) {
+    const now = new Date();
+    await db.insert(frames).values({
+      matchId: match.id,
+      frameNumber: lastFrame.frameNumber + 1,
+      winnerSlot: null,
+      player1Fouls: 0,
+      player2Fouls: 0,
+      createdAt: now,
+      updatedAt: now,
+    });
+  }
+}
+
+async function loadMatchState(c: AppContext, matchId: string, currentUserId: number | null) {
+  const db = getDatabase(c);
+  const match = await db.select().from(matches).where(eq(matches.id, matchId)).get();
+
+  if (!match) {
+    return null;
+  }
+
+  await normalizeFrames(c, match);
+  const frameRows = await db.select().from(frames).where(eq(frames.matchId, match.id)).orderBy(asc(frames.frameNumber)).all();
+  const totalWins = calculateTotalWins(frameRows);
+  const winnerSlot = determineWinnerSlot(match, frameRows);
+  const winnerMessage = winnerSlot
+    ? `${playerName(match, winnerSlot)}赢得了本场比赛，比分为 ${playerName(match, 1)} ${totalWins[1]} : ${playerName(match, 2)} ${totalWins[2]}`
+    : null;
+
+  return {
+    code: match.code,
+    targetWins: match.targetWins,
+    players: [
+      {
+        slot: 1 as const,
+        name: match.player1UserId ? match.player1Name : null,
+        occupied: Boolean(match.player1UserId),
+        isSelf: match.player1UserId === currentUserId,
+      },
+      {
+        slot: 2 as const,
+        name: match.player2UserId ? match.player2Name : null,
+        occupied: Boolean(match.player2UserId),
+        isSelf: match.player2UserId === currentUserId,
+      },
+    ],
+    frames: frameRows.map((frame) => ({
+      number: frame.frameNumber,
+      winnerSlot: frame.winnerSlot === 1 || frame.winnerSlot === 2 ? frame.winnerSlot : null,
+      player1Fouls: frame.player1Fouls,
+      player2Fouls: frame.player2Fouls,
+    })),
+    totalWins,
+    winnerSlot,
+    winnerMessage,
+  } satisfies MatchState;
+}
+
+async function clearUserCurrentMatch(c: AppContext, userId: number) {
+  const db = getDatabase(c);
+  await db
+    .update(users)
+    .set({
+      currentMatchId: null,
+      updatedAt: new Date(),
+    })
+    .where(eq(users.id, userId));
+}
+
+async function loadCurrentMatchContext(c: AppContext, user: User) {
+  if (!user.currentMatchId) {
+    return null;
+  }
+
+  const db = getDatabase(c);
+  const match = await db.select().from(matches).where(eq(matches.id, user.currentMatchId)).get();
+
+  if (!match) {
+    await clearUserCurrentMatch(c, user.id);
+    return null;
+  }
+
+  const slot = match.player1UserId === user.id ? 1 : match.player2UserId === user.id ? 2 : null;
+
+  if (!slot) {
+    await clearUserCurrentMatch(c, user.id);
+    return null;
+  }
+
+  return {
+    match,
+    slot: slot as 1 | 2,
+  };
+}
+
+async function ensureCurrentMatch(c: AppContext) {
+  await cleanupStaleMatches(c);
   const user = await getAuthenticatedUser(c);
 
   if (!user) {
-    return { user: null, response: c.json({ error: "authentication required" }, 401) };
+    return {
+      user: null,
+      context: null,
+      response: c.json({ error: "需要先填写名字并进入比赛" }, 401),
+    };
   }
 
-  return { user, response: null };
+  const context = await loadCurrentMatchContext(c, user);
+
+  if (!context) {
+    return {
+      user,
+      context: null,
+      response: c.json({ error: "当前没有进行中的比赛" }, 404),
+    };
+  }
+
+  return {
+    user,
+    context,
+    response: null,
+  };
+}
+
+async function generateMatchCode(c: AppContext) {
+  const db = getDatabase(c);
+  const existingCodes = new Set((await db.select({ code: matches.code }).from(matches).all()).map((match) => match.code));
+
+  for (let digits = 2; digits <= 6; digits += 1) {
+    const upperBound = 10 ** digits;
+    const occupiedForDigits = Array.from(existingCodes).filter((code) => code.length === digits).length;
+
+    if (occupiedForDigits >= upperBound) {
+      continue;
+    }
+
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      const candidate = String(Math.floor(Math.random() * upperBound)).padStart(digits, "0");
+
+      if (!existingCodes.has(candidate)) {
+        return candidate;
+      }
+    }
+
+    for (let candidateNumber = 0; candidateNumber < upperBound; candidateNumber += 1) {
+      const candidate = String(candidateNumber).padStart(digits, "0");
+
+      if (!existingCodes.has(candidate)) {
+        return candidate;
+      }
+    }
+  }
+
+  throw new Error("unable to allocate match code");
+}
+
+function serializeUser(user: User | null) {
+  return user
+    ? {
+      name: user.name,
+    }
+    : null;
+}
+
+async function respondWithCurrentState(c: AppContext, user: User) {
+  const freshUser = await getDatabase(c).select().from(users).where(eq(users.id, user.id)).get();
+  const currentUser = freshUser ?? user;
+  const context = await loadCurrentMatchContext(c, currentUser);
+  const matchState = context ? await loadMatchState(c, context.match.id, currentUser.id) : null;
+  return c.json({ user: serializeUser(currentUser), match: matchState });
 }
 
 function renderHomePage() {
   return `<!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -36,508 +398,853 @@ function renderHomePage() {
     <style>
       :root {
         color-scheme: light;
-        --bg: #f4efe7;
-        --card: rgba(255, 252, 247, 0.88);
-        --ink: #1d1a17;
-        --muted: #6a625b;
-        --line: rgba(29, 26, 23, 0.12);
-        --accent: #136f63;
-        --accent-strong: #0e564d;
-        --shadow: 0 24px 60px rgba(20, 18, 16, 0.14);
+        --bg: #0f172a;
+        --panel: rgba(15, 23, 42, 0.88);
+        --panel-strong: #111827;
+        --card: rgba(30, 41, 59, 0.95);
+        --line: rgba(148, 163, 184, 0.22);
+        --text: #f8fafc;
+        --muted: #cbd5e1;
+        --accent: #22c55e;
+        --accent-soft: rgba(34, 197, 94, 0.18);
+        --danger: #ef4444;
+        --danger-soft: rgba(239, 68, 68, 0.16);
+        --warning: #f59e0b;
+        --button: #334155;
+        --button-strong: #475569;
       }
-
       * { box-sizing: border-box; }
       body {
         margin: 0;
         min-height: 100vh;
-        font-family: Georgia, "Times New Roman", serif;
-        color: var(--ink);
-        background:
-          radial-gradient(circle at top left, rgba(19, 111, 99, 0.18), transparent 36%),
-          radial-gradient(circle at bottom right, rgba(214, 124, 74, 0.2), transparent 30%),
-          linear-gradient(180deg, #f9f4ed 0%, var(--bg) 100%);
+        font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: radial-gradient(circle at top, #1e293b, var(--bg) 48%);
+        color: var(--text);
       }
       main {
-        width: min(920px, calc(100vw - 32px));
+        width: min(100%, 560px);
         margin: 0 auto;
-        padding: 48px 0 64px;
+        padding: 18px 14px 36px;
       }
-      .hero, .panel {
+      .stack { display: grid; gap: 14px; }
+      .panel {
+        background: var(--panel);
         border: 1px solid var(--line);
         border-radius: 24px;
-        background: var(--card);
-        box-shadow: var(--shadow);
-        backdrop-filter: blur(12px);
+        padding: 18px;
+        box-shadow: 0 24px 60px rgba(15, 23, 42, 0.45);
       }
-      .hero { padding: 28px; }
-      .eyebrow {
+      h1, h2, h3, p { margin: 0; }
+      h1 { font-size: 2rem; }
+      h2 { font-size: 1.05rem; margin-bottom: 12px; }
+      p, label, .muted, .hint { color: var(--muted); }
+      .hero { display: grid; gap: 8px; }
+      .badge {
         display: inline-flex;
+        width: fit-content;
         align-items: center;
         gap: 8px;
-        padding: 6px 12px;
+        padding: 6px 10px;
         border-radius: 999px;
-        font-size: 12px;
-        letter-spacing: 0.08em;
-        text-transform: uppercase;
-        color: var(--accent-strong);
-        background: rgba(19, 111, 99, 0.1);
+        background: rgba(59, 130, 246, 0.16);
+        color: #bfdbfe;
+        font-size: 0.82rem;
       }
-      h1 {
-        margin: 18px 0 8px;
-        font-size: clamp(2.2rem, 6vw, 4.4rem);
-        line-height: 0.94;
+      .status {
+        min-height: 24px;
+        font-size: 0.95rem;
+        color: #bfdbfe;
       }
-      p {
-        margin: 0;
-        color: var(--muted);
-        font-size: 1rem;
-        line-height: 1.6;
-      }
-      .hero-grid { gap: 18px; margin-top: 28px; }
-      .chips { display: flex; flex-wrap: wrap; gap: 10px; }
-      .chips span {
-        padding: 8px 12px;
-        border-radius: 999px;
-        background: rgba(29, 26, 23, 0.05);
-        color: var(--ink);
-        font-size: 14px;
-      }
-      .layout {
-        display: grid;
-        grid-template-columns: 1.2fr 0.8fr;
-        gap: 20px;
-        margin-top: 20px;
-      }
-      .panel { padding: 22px; }
-      .panel h2 { margin: 0 0 12px; font-size: 1.1rem; }
-      form { display: grid; gap: 12px; }
-      input, button { font: inherit; }
-      input {
+      .lobby-grid, .match-stack, .score-grid, .frame-list { display: grid; gap: 12px; }
+      .field { display: grid; gap: 8px; }
+      .field input, .number-input {
         width: 100%;
-        padding: 14px 16px;
-        border-radius: 16px;
         border: 1px solid var(--line);
-        background: rgba(255, 255, 255, 0.9);
-        color: var(--ink);
+        border-radius: 16px;
+        background: rgba(15, 23, 42, 0.9);
+        color: var(--text);
+        padding: 14px 16px;
+        font-size: 1rem;
       }
+      .field input::placeholder, .number-input::placeholder { color: #94a3b8; }
       button {
         border: 0;
         border-radius: 16px;
-        padding: 14px 18px;
-        cursor: pointer;
-        color: white;
-        background: linear-gradient(135deg, var(--accent) 0%, #0b4a42 100%);
-      }
-      button:disabled { cursor: wait; opacity: 0.7; }
-      ul {
-        list-style: none;
-        margin: 0;
-        padding: 0;
-        display: grid;
-        gap: 12px;
-      }
-      li {
-        display: grid;
-        grid-template-columns: auto 1fr auto;
-        gap: 12px;
-        align-items: center;
+        background: var(--button);
+        color: var(--text);
         padding: 14px 16px;
+        font-size: 1rem;
+        font-weight: 700;
+      }
+      button.primary { background: var(--accent); color: #052e16; }
+      button.secondary { background: var(--button-strong); }
+      button.danger { background: var(--danger); }
+      button.ghost {
+        background: transparent;
         border: 1px solid var(--line);
+      }
+      button.active {
+        background: var(--accent);
+        color: #052e16;
+      }
+      button:disabled, input:disabled {
+        opacity: 0.7;
+      }
+      .button-row {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+      }
+      .match-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        gap: 12px;
+      }
+      .code {
+        font-size: 2rem;
+        font-weight: 800;
+        letter-spacing: 0.16em;
+      }
+      .score-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+      .score-card, .frame-card, .stepper, .target-card {
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: 20px;
+        padding: 14px;
+      }
+      .score-card strong {
+        display: block;
+        font-size: 2.2rem;
+        margin-top: 6px;
+      }
+      .self-tag {
+        display: inline-flex;
+        margin-left: 8px;
+        padding: 2px 8px;
+        border-radius: 999px;
+        background: rgba(34, 197, 94, 0.16);
+        color: #86efac;
+        font-size: 0.78rem;
+      }
+      .target-card { display: grid; gap: 12px; }
+      .stepper-row {
+        display: grid;
+        grid-template-columns: 52px minmax(0, 1fr) 52px;
+        gap: 10px;
+        align-items: center;
+      }
+      .stepper-row button { padding: 14px 0; }
+      .stepper-row input {
+        text-align: center;
+        font-size: 1.15rem;
+        font-weight: 700;
+      }
+      .frame-card {
+        display: grid;
+        gap: 12px;
+      }
+      .frame-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 12px;
+      }
+      .winner-row, .foul-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+      }
+      .win-button {
+        min-height: 54px;
+        background: rgba(148, 163, 184, 0.18);
+      }
+      .clear-button {
+        padding: 10px 12px;
+        font-size: 0.88rem;
+      }
+      .announcement {
+        padding: 14px 16px;
         border-radius: 18px;
-        background: rgba(255, 255, 255, 0.7);
+        background: var(--accent-soft);
+        color: #dcfce7;
+        border: 1px solid rgba(34, 197, 94, 0.28);
+        font-weight: 700;
       }
-      li[data-completed="true"] .todo-title {
-        text-decoration: line-through;
-        color: var(--muted);
+      .danger-note {
+        padding: 12px 14px;
+        border-radius: 18px;
+        background: var(--danger-soft);
+        color: #fecaca;
+        border: 1px solid rgba(239, 68, 68, 0.28);
       }
-      .todo-meta { font-size: 12px; color: var(--muted); }
-      .status { min-height: 24px; margin-top: 12px; font-size: 14px; color: var(--muted); }
-      .mini-meta { display: grid; gap: 10px; }
-      .mini-meta code {
-        padding: 2px 6px;
-        border-radius: 8px;
-        background: rgba(29, 26, 23, 0.06);
+      .empty-seat {
+        padding: 12px 14px;
+        border-radius: 18px;
+        background: rgba(59, 130, 246, 0.14);
+        color: #bfdbfe;
+        border: 1px solid rgba(59, 130, 246, 0.22);
       }
-      @media (max-width: 820px) {
-        .layout { grid-template-columns: 1fr; }
+      .footer-note {
+        text-align: center;
+        font-size: 0.82rem;
+        color: #94a3b8;
       }
     </style>
   </head>
   <body>
-    <main>
-      <section class="hero">
-        <span class="eyebrow">Cloudflare Workers Prototype</span>
+    <main class="stack">
+      <section class="panel hero">
+        <span class="badge">手机优先 · 双人台球计分板</span>
         <h1>${PROJECT_NAME}</h1>
-        <p>A minimal runnable prototype page backed by D1. It uses one simple table, a small HTML/CSS/JS shell, and live interaction against the Worker API.</p>
-        <div class="hero-grid">
-          <div class="chips">
-            <span>Worker: ${WORKER_NAME}</span>
-            <span>D1: ${D1_DATABASE_NAME}</span>
-            <span>Runtime: Hono + Workers</span>
-            <span>Tests: Vitest</span>
-          </div>
-        </div>
+        <p>输入名字即可开始。数据库会记录比赛、局数、犯规和当前所在比赛，身份通过 Cookie 会话校验。</p>
       </section>
-
-      <section class="layout">
-        <div class="panel">
-          <h2>Prototype Board</h2>
-          <div class="status" id="status">Checking session...</div>
-
-          <section id="login-shell">
-            <form id="login-form">
-              <input id="username-input" name="username" value="${ADMIN_USERNAME}" autocomplete="username" required />
-              <input id="password-input" name="password" type="password" placeholder="Password" autocomplete="current-password" required />
-              <button id="login-button" type="submit">Log in</button>
-            </form>
-          </section>
-
-          <section id="board-shell" hidden>
-            <div class="todo-meta" id="session-label"></div>
-            <div style="height: 12px"></div>
-            <form id="todo-form">
-              <input id="todo-input" name="title" maxlength="120" placeholder="Add the next prototype task" required />
-              <button id="submit-button" type="submit">Create item</button>
-            </form>
-            <div style="height: 12px"></div>
-            <button id="logout-button" type="button">Log out</button>
-            <div style="height: 12px"></div>
-            <ul id="todo-list"></ul>
-          </section>
-        </div>
-
-        <aside class="panel">
-          <h2>Runtime Notes</h2>
-          <div class="mini-meta">
-            <p>This page is intentionally small, but it already exercises the full loop: browser UI, Worker route, D1 persistence, and session-based login.</p>
-            <p>Default deploy URL: <code>${WORKER_NAME}.&lt;your-workers-dev-subdomain&gt;.workers.dev</code></p>
-            <p>Public visitors can open the page, but data-changing interactions require login. The initial account is <code>${ADMIN_USERNAME}</code>.</p>
-          </div>
-        </aside>
+      <section class="panel">
+        <div class="status" id="status">正在连接…</div>
       </section>
+      <section class="panel" id="app-shell"></section>
+      <p class="footer-note">Worker: ${WORKER_NAME}</p>
     </main>
-
     <script>
-      const loginShell = document.getElementById("login-shell");
-      const boardShell = document.getElementById("board-shell");
-      const loginForm = document.getElementById("login-form");
-      const usernameInput = document.getElementById("username-input");
-      const passwordInput = document.getElementById("password-input");
-      const loginButton = document.getElementById("login-button");
-      const form = document.getElementById("todo-form");
-      const input = document.getElementById("todo-input");
-      const list = document.getElementById("todo-list");
-      const status = document.getElementById("status");
-      const submitButton = document.getElementById("submit-button");
-      const logoutButton = document.getElementById("logout-button");
-      const sessionLabel = document.getElementById("session-label");
+      const shell = document.getElementById("app-shell");
+      const statusNode = document.getElementById("status");
+      const state = { user: null, match: null, busy: false };
 
       function setStatus(message) {
-        status.textContent = message;
+        statusNode.textContent = message;
       }
 
-      async function parseResponsePayload(response) {
-        const text = await response.text();
+      function make(tag, options = {}) {
+        const node = document.createElement(tag);
+        if (options.className) node.className = options.className;
+        if (options.text != null) node.textContent = options.text;
+        if (options.html != null) node.innerHTML = options.html;
+        if (options.type) node.type = options.type;
+        if (options.placeholder) node.placeholder = options.placeholder;
+        if (options.value != null) node.value = String(options.value);
+        if (options.min != null) node.min = String(options.min);
+        if (options.max != null) node.max = String(options.max);
+        if (options.inputMode) node.inputMode = options.inputMode;
+        return node;
+      }
 
-        if (!text) {
-          return {};
+      async function parsePayload(response) {
+        const text = await response.text();
+        if (!text) return {};
+        return JSON.parse(text);
+      }
+
+      async function api(path, options = {}) {
+        const headers = new Headers(options.headers || {});
+        if (options.body != null && !headers.has("content-type")) {
+          headers.set("content-type", "application/json");
         }
+
+        const response = await fetch(path, { ...options, headers });
+        const payload = await parsePayload(response);
+
+        if (!response.ok) {
+          throw new Error(payload.error || "请求失败");
+        }
+
+        return payload;
+      }
+
+      function applyPayload(payload) {
+        if (Object.prototype.hasOwnProperty.call(payload, "user")) {
+          state.user = payload.user;
+        }
+        if (Object.prototype.hasOwnProperty.call(payload, "match")) {
+          state.match = payload.match;
+        }
+      }
+
+      async function runAction(message, task) {
+        if (state.busy) return;
+        state.busy = true;
+        setStatus(message);
 
         try {
-          return JSON.parse(text);
-        } catch {
-          throw new Error(text);
+          const payload = await task();
+          applyPayload(payload || {});
+          render();
+          setStatus(state.match ? "已同步比赛状态。" : "准备开始新的比赛。");
+        } catch (error) {
+          setStatus(error instanceof Error ? error.message : "发生未知错误");
+        } finally {
+          state.busy = false;
         }
       }
 
-      function setAuthenticated(user) {
-        const authenticated = Boolean(user);
-        loginShell.hidden = authenticated;
-        boardShell.hidden = !authenticated;
-        sessionLabel.textContent = authenticated ? 'Logged in as ' + user.username : '';
+      function createStepper(value, onCommit, minimum, maximum) {
+        const wrapper = make("div", { className: "stepper-row" });
+        const minus = make("button", { text: "-" });
+        const input = make("input", {
+          type: "number",
+          className: "number-input",
+          value,
+          min: minimum,
+          max: maximum,
+          inputMode: "numeric"
+        });
+        const plus = make("button", { text: "+" });
+
+        minus.addEventListener("click", () => {
+          const next = Math.max(minimum, Number(input.value || value) - 1);
+          input.value = String(next);
+          onCommit(next);
+        });
+
+        plus.addEventListener("click", () => {
+          const next = Math.min(maximum, Number(input.value || value) + 1);
+          input.value = String(next);
+          onCommit(next);
+        });
+
+        input.addEventListener("change", () => {
+          const raw = Number(input.value);
+          const next = Number.isFinite(raw) ? Math.min(maximum, Math.max(minimum, Math.round(raw))) : value;
+          input.value = String(next);
+          onCommit(next);
+        });
+
+        wrapper.append(minus, input, plus);
+        return wrapper;
       }
 
-      function renderItems(items) {
-        if (items.length === 0) {
-          list.innerHTML = '<li><div class="todo-title">No items yet.</div><div class="todo-meta">Create the first prototype task above.</div><span></span></li>';
-          return;
+      function renderLobby() {
+        shell.replaceChildren();
+        const container = make("div", { className: "lobby-grid" });
+
+        const intro = make("div", { className: "stack" });
+        intro.append(
+          make("h2", { text: state.user ? "你好，" + state.user.name : "开始一场新比赛" }),
+          make("p", { text: "同一时间一个名字只能在一场比赛里。创建后把比赛编号发给另一位玩家即可。" })
+        );
+
+        const nameField = make("label", { className: "field" });
+        nameField.append(
+          make("span", { text: "你的名字" }),
+          make("input", {
+            placeholder: "例如：小王",
+            value: state.user ? state.user.name : ""
+          })
+        );
+        const nameInput = nameField.querySelector("input");
+
+        const createButton = make("button", { className: "primary", text: "开启新比赛" });
+        createButton.addEventListener("click", () => {
+          runAction("正在创建比赛…", () => api("/api/matches", {
+            method: "POST",
+            body: JSON.stringify({ name: nameInput.value })
+          }));
+        });
+
+        const joinCard = make("div", { className: "frame-card" });
+        joinCard.append(make("h2", { text: "加入已有比赛" }));
+        const codeField = make("label", { className: "field" });
+        codeField.append(
+          make("span", { text: "比赛编号" }),
+          make("input", {
+            placeholder: "输入两位数或更多编号",
+            inputMode: "numeric"
+          })
+        );
+        const codeInput = codeField.querySelector("input");
+        const joinButton = make("button", { className: "secondary", text: "加入比赛" });
+        joinButton.addEventListener("click", () => {
+          runAction("正在加入比赛…", () => api("/api/matches/join", {
+            method: "POST",
+            body: JSON.stringify({ name: nameInput.value, code: codeInput.value })
+          }));
+        });
+        joinCard.append(codeField, joinButton);
+
+        container.append(intro, nameField, createButton, joinCard);
+        shell.append(container);
+      }
+
+      function renderMatch() {
+        shell.replaceChildren();
+        const match = state.match;
+        if (!match) return;
+
+        const container = make("div", { className: "match-stack" });
+        const header = make("div", { className: "match-header" });
+        const titleBox = make("div", { className: "stack" });
+        titleBox.append(
+          make("h2", { text: "当前比赛" }),
+          make("div", { className: "code", text: match.code })
+        );
+        const targetBox = make("div", { className: "muted", text: "先胜 " + match.targetWins + " 局" });
+        header.append(titleBox, targetBox);
+        container.append(header);
+
+        const scoreGrid = make("div", { className: "score-grid" });
+        match.players.forEach((player) => {
+          const card = make("div", { className: "score-card" });
+          const nameRow = make("div");
+          nameRow.append(make("span", { text: player.name || ("空位 " + player.slot) }));
+          if (player.isSelf) {
+            nameRow.append(make("span", { className: "self-tag", text: "你" }));
+          }
+          card.append(nameRow, make("strong", { text: String(match.totalWins[player.slot]) }), make("p", { text: "总比分（只读）" }));
+          scoreGrid.append(card);
+        });
+        container.append(scoreGrid);
+
+        if (match.winnerMessage) {
+          container.append(make("div", { className: "announcement", text: match.winnerMessage }));
         }
 
-        list.innerHTML = items.map((item) => {
-          const createdAt = new Date(item.createdAt).toLocaleString();
-          return [
-            '<li>',
-            '<input type="checkbox" data-id="' + item.id + '" aria-label="Delete todo" />',
-            '<div>',
-            '<div class="todo-title">' + item.title + '</div>',
-            '<div class="todo-meta">Created ' + createdAt + '</div>',
-            '</div>',
-            '<span class="todo-meta">#' + item.id + '</span>',
-            '</li>'
-          ].join('');
-        }).join('');
+        if (match.players.some((player) => !player.occupied)) {
+          container.append(make("div", { className: "empty-seat", text: "当前有空位，把比赛编号告诉另一位玩家即可继续。" }));
+        }
+
+        const targetCard = make("div", { className: "target-card" });
+        targetCard.append(make("h2", { text: "胜利所需局数" }));
+        targetCard.append(createStepper(match.targetWins, (value) => {
+          runAction("正在更新目标局数…", () => api("/api/matches/current/target-wins", {
+            method: "POST",
+            body: JSON.stringify({ value })
+          }));
+        }, 1, 99));
+        container.append(targetCard);
+
+        const frameList = make("div", { className: "frame-list" });
+        match.frames.forEach((frame) => {
+          const frameCard = make("div", { className: "frame-card" });
+          const frameHead = make("div", { className: "frame-head" });
+          frameHead.append(make("h3", { text: "第 " + frame.number + " 局" }));
+          if (frame.winnerSlot != null) {
+            const clearButton = make("button", { className: "ghost clear-button", text: "清空胜负" });
+            clearButton.addEventListener("click", () => {
+              runAction("正在修改胜负…", () => api("/api/matches/current/frames/" + frame.number + "/winner", {
+                method: "POST",
+                body: JSON.stringify({ slot: null })
+              }));
+            });
+            frameHead.append(clearButton);
+          }
+          frameCard.append(frameHead);
+
+          const winnerRow = make("div", { className: "winner-row" });
+          match.players.forEach((player) => {
+            const button = make("button", {
+              className: "win-button" + (frame.winnerSlot === player.slot ? " active" : ""),
+              text: (player.name || ("玩家" + player.slot)) + " · win"
+            });
+            button.addEventListener("click", () => {
+              runAction("正在记录胜负…", () => api("/api/matches/current/frames/" + frame.number + "/winner", {
+                method: "POST",
+                body: JSON.stringify({ slot: player.slot })
+              }));
+            });
+            winnerRow.append(button);
+          });
+          frameCard.append(winnerRow);
+
+          const foulGrid = make("div", { className: "foul-grid" });
+          match.players.forEach((player) => {
+            const stepperCard = make("div", { className: "stepper" });
+            stepperCard.append(make("p", { text: (player.name || ("玩家" + player.slot)) + " 犯规" }));
+            const value = player.slot === 1 ? frame.player1Fouls : frame.player2Fouls;
+            stepperCard.append(createStepper(value, (next) => {
+              runAction("正在更新犯规次数…", () => api("/api/matches/current/frames/" + frame.number + "/fouls", {
+                method: "POST",
+                body: JSON.stringify({ slot: player.slot, value: next })
+              }));
+            }, 0, 99));
+            foulGrid.append(stepperCard);
+          });
+          frameCard.append(foulGrid);
+          frameList.append(frameCard);
+        });
+        container.append(frameList);
+
+        const actions = make("div", { className: "button-row" });
+        const leaveButton = make("button", { className: "danger", text: "退出当前比赛" });
+        leaveButton.addEventListener("click", () => {
+          if (!window.confirm("确定退出当前比赛吗？")) return;
+          runAction("正在退出比赛…", () => api("/api/matches/current/leave", { method: "POST" }));
+        });
+        const resetButton = make("button", { className: "ghost", text: "重置当前比赛" });
+        resetButton.addEventListener("click", () => {
+          if (!window.confirm("确定重置当前比赛吗？比分和犯规都会清空。")) return;
+          runAction("正在重置比赛…", () => api("/api/matches/current/reset", { method: "POST" }));
+        });
+        actions.append(leaveButton, resetButton);
+        container.append(actions);
+        container.append(make("div", { className: "danger-note", text: "比赛 6 小时无人操作时会被自动清理；两个玩家都退出后也会删除。" }));
+        shell.append(container);
+      }
+
+      function render() {
+        if (state.match) {
+          renderMatch();
+        } else {
+          renderLobby();
+        }
       }
 
       async function loadSession() {
-        const response = await fetch('/api/session');
-        const payload = await parseResponsePayload(response);
-        setAuthenticated(payload.user || null);
-        return payload.user || null;
+        const payload = await api("/api/session");
+        applyPayload(payload);
+        render();
+        setStatus(state.match ? "已恢复进行中的比赛。" : "准备开始新的比赛。");
       }
 
-      async function loadItems() {
-        setStatus("Loading items from D1...");
-        const response = await fetch("/api/todos");
-
-        if (response.status === 401) {
-          setAuthenticated(null);
-          setStatus('Please log in.');
-          return;
-        }
-
-        const payload = await parseResponsePayload(response);
-        renderItems(payload.items);
-        setStatus("Ready.");
-      }
-
-      async function logIn(username, password) {
-        const response = await fetch('/api/login', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ username, password })
-        });
-
-        const payload = await parseResponsePayload(response);
-
-        if (!response.ok) {
-          throw new Error(payload.error || 'Unable to log in');
-        }
-
-        return payload.user;
-      }
-
-      async function logOut() {
-        await fetch('/api/logout', { method: 'POST' });
-      }
-
-      async function createItem(title) {
-        const response = await fetch("/api/todos", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ title })
-        });
-
-        if (!response.ok) {
-          const payload = await parseResponsePayload(response);
-          throw new Error(payload.error || "Unable to create item");
-        }
-      }
-
-      async function deleteItem(id) {
-        const response = await fetch('/api/todos/' + id, {
-          method: 'DELETE'
-        });
-
-        if (!response.ok) {
-          throw new Error('Unable to delete item');
-        }
-      }
-
-      loginForm.addEventListener('submit', async (event) => {
-        event.preventDefault();
-        loginButton.disabled = true;
-        setStatus('Logging in...');
-
-        try {
-          const user = await logIn(usernameInput.value.trim(), passwordInput.value);
-          setAuthenticated(user);
-          passwordInput.value = '';
-          await loadItems();
-        } catch (error) {
-          setStatus(error instanceof Error ? error.message : 'Unknown error');
-        } finally {
-          loginButton.disabled = false;
-        }
+      loadSession().catch((error) => {
+        renderLobby();
+        setStatus(error instanceof Error ? error.message : "连接失败");
       });
-
-      form.addEventListener("submit", async (event) => {
-        event.preventDefault();
-        const title = input.value.trim();
-        if (!title) {
-          setStatus("Title is required.");
-          return;
-        }
-
-        submitButton.disabled = true;
-        setStatus("Creating item...");
-
-        try {
-          await createItem(title);
-          input.value = "";
-          await loadItems();
-        } catch (error) {
-          setStatus(error instanceof Error ? error.message : "Unknown error");
-        } finally {
-          submitButton.disabled = false;
-          input.focus();
-        }
-      });
-
-      logoutButton.addEventListener('click', async () => {
-        setStatus('Logging out...');
-        await logOut();
-        setAuthenticated(null);
-        list.innerHTML = '';
-        setStatus('Logged out.');
-      });
-
-      list.addEventListener("change", async (event) => {
-        const target = event.target;
-        if (!(target instanceof HTMLInputElement) || target.type !== "checkbox") {
-          return;
-        }
-
-        if (!target.checked) {
-          return;
-        }
-
-        setStatus("Deleting item...");
-
-        try {
-          await deleteItem(target.dataset.id);
-          await loadItems();
-        } catch (error) {
-          setStatus(error instanceof Error ? error.message : "Unknown error");
-          target.checked = !target.checked;
-        }
-      });
-
-      loadSession()
-        .then((user) => user ? loadItems() : setStatus('Please log in to view and modify data.'))
-        .catch((error) => {
-          setStatus(error instanceof Error ? error.message : 'Unable to connect to D1');
-        });
     </script>
   </body>
 </html>`;
 }
 
-app.get("/", (c) => {
-  return c.html(renderHomePage());
-});
+app.get("/", (c) => c.html(renderHomePage()));
 
-app.get("/health", (c) => {
-  return c.json({
-    ok: true,
-    projectName: PROJECT_NAME,
-    workerName: WORKER_NAME,
-    databaseName: D1_DATABASE_NAME,
-  });
-});
+app.get("/health", (c) => c.json({ ok: true, projectName: PROJECT_NAME, workerName: WORKER_NAME }));
 
 app.get("/api/session", async (c) => {
+  await cleanupStaleMatches(c);
   const user = await getAuthenticatedUser(c);
-  return c.json({
-    user: user ? { username: user.username } : null,
-  });
-});
-
-app.post("/api/login", async (c) => {
-  if (!c.env.ADMIN_PASSWORD) {
-    return c.json({ error: "ADMIN_PASSWORD secret is not configured" }, 500);
-  }
-
-  const payload = await c.req.json<{ username?: unknown; password?: unknown }>();
-
-  if (typeof payload.username !== "string" || typeof payload.password !== "string") {
-    return c.json({ error: "username and password are required" }, 400);
-  }
-
-  const user = await login(c, payload.username.trim(), payload.password);
 
   if (!user) {
-    return c.json({ error: "invalid credentials" }, 401);
+    return c.json({ user: null, match: null });
   }
 
-  return c.json({ user: { username: user.username } });
+  const context = await loadCurrentMatchContext(c, user);
+  const matchState = context ? await loadMatchState(c, context.match.id, user.id) : null;
+  return c.json({ user: serializeUser(user), match: matchState });
 });
 
-app.post("/api/logout", async (c) => {
-  await logout(c);
-  return c.json({ ok: true });
-});
+app.post("/api/matches", async (c) => {
+  await cleanupStaleMatches(c);
+  const payload = await readJson<{ name?: unknown }>(c);
+  const name = normalizeName(payload?.name);
 
-app.get("/api/todos", async (c) => {
-  const auth = await requireUser(c);
-  if (auth.response) {
-    return auth.response;
+  if (!name) {
+    return c.json({ error: `名字必填，且不能超过 ${MAX_NAME_LENGTH} 个字符` }, 400);
   }
 
-  const db = drizzle(c.env.DB);
-  const items = await db.select().from(todos).orderBy(asc(todos.id));
-  return c.json({ items });
-});
+  const user = await upsertSessionUser(c, name);
+  const existingContext = await loadCurrentMatchContext(c, user);
 
-app.post("/api/todos", async (c) => {
-  const auth = await requireUser(c);
-  if (auth.response) {
-    return auth.response;
+  if (existingContext) {
+    return c.json({ error: "你已经在另一场比赛里了，请先退出当前比赛" }, 409);
   }
 
-  const payload = await c.req.json<{ title?: unknown }>();
+  const db = getDatabase(c);
+  const now = new Date();
+  const matchId = crypto.randomUUID();
+  const code = await generateMatchCode(c);
 
-  if (typeof payload.title !== "string" || payload.title.trim().length === 0) {
-    return c.json({ error: "title is required" }, 400);
-  }
-
-  const db = drizzle(c.env.DB);
-  const insertResult = await db.insert(todos).values({
-    title: payload.title.trim(),
-    completed: false,
-    createdAt: new Date(),
+  await db.insert(matches).values({
+    id: matchId,
+    code,
+    targetWins: DEFAULT_TARGET_WINS,
+    player1UserId: user.id,
+    player1Name: name,
+    player2UserId: null,
+    player2Name: null,
+    createdAt: now,
+    updatedAt: now,
   });
-  const insertedIdValue = insertResult.meta?.last_row_id;
 
-  if (insertedIdValue == null) {
-    return c.json({ error: "todo created but could not load inserted row" }, 500);
-  }
+  await db.insert(frames).values({
+    matchId,
+    frameNumber: 1,
+    winnerSlot: null,
+    player1Fouls: 0,
+    player2Fouls: 0,
+    createdAt: now,
+    updatedAt: now,
+  });
 
-  const insertedId = Number(insertedIdValue);
+  await db
+    .update(users)
+    .set({
+      name,
+      currentMatchId: matchId,
+      updatedAt: now,
+    })
+    .where(eq(users.id, user.id));
 
-  if (!Number.isInteger(insertedId) || insertedId <= 0) {
-    return c.json({ error: "todo created but could not load inserted row" }, 500);
-  }
-
-  const item = await db.select().from(todos).where(eq(todos.id, insertedId)).get();
-
-  if (!item) {
-    return c.json({ error: "todo created but could not load inserted row" }, 500);
-  }
-
-  return c.json({ item }, 201);
+  const matchState = await loadMatchState(c, matchId, user.id);
+  return c.json({ user: serializeUser({ ...user, name, currentMatchId: matchId, updatedAt: now }), match: matchState }, 201);
 });
 
-app.delete("/api/todos/:id", async (c) => {
-  const auth = await requireUser(c);
-  if (auth.response) {
-    return auth.response;
+app.post("/api/matches/join", async (c) => {
+  await cleanupStaleMatches(c);
+  const payload = await readJson<{ name?: unknown; code?: unknown }>(c);
+  const name = normalizeName(payload?.name);
+  const code = normalizeCode(payload?.code);
+
+  if (!name) {
+    return c.json({ error: `名字必填，且不能超过 ${MAX_NAME_LENGTH} 个字符` }, 400);
   }
 
-  const id = Number(c.req.param("id"));
-
-  if (!Number.isInteger(id) || id <= 0) {
-    return c.json({ error: "invalid id" }, 400);
+  if (!code) {
+    return c.json({ error: "比赛编号格式不正确" }, 400);
   }
 
-  const db = drizzle(c.env.DB);
-  const existing = await db.select().from(todos).where(eq(todos.id, id)).get();
+  const user = await upsertSessionUser(c, name);
+  const existingContext = await loadCurrentMatchContext(c, user);
 
-  if (!existing) {
-    return c.json({ error: "todo not found" }, 404);
+  if (existingContext) {
+    if (existingContext.match.code === code) {
+      const matchState = await loadMatchState(c, existingContext.match.id, user.id);
+      return c.json({ user: serializeUser(user), match: matchState });
+    }
+
+    return c.json({ error: "你已经在另一场比赛里了，请先退出当前比赛" }, 409);
   }
 
-  await db.delete(todos).where(eq(todos.id, id));
+  const db = getDatabase(c);
+  const match = await db.select().from(matches).where(eq(matches.code, code)).get();
 
+  if (!match) {
+    return c.json({ error: "没有找到这个比赛编号" }, 404);
+  }
+
+  let updateValues: Partial<typeof matches.$inferInsert> | null = null;
+
+  if (!match.player1UserId) {
+    updateValues = { player1UserId: user.id, player1Name: name };
+  } else if (!match.player2UserId) {
+    updateValues = { player2UserId: user.id, player2Name: name };
+  } else {
+    return c.json({ error: "这场比赛已经满员了" }, 409);
+  }
+
+  const now = new Date();
+  await db
+    .update(matches)
+    .set({
+      ...updateValues,
+      updatedAt: now,
+    })
+    .where(eq(matches.id, match.id));
+
+  await db
+    .update(users)
+    .set({
+      name,
+      currentMatchId: match.id,
+      updatedAt: now,
+    })
+    .where(eq(users.id, user.id));
+
+  const matchState = await loadMatchState(c, match.id, user.id);
+  return c.json({ user: serializeUser({ ...user, name, currentMatchId: match.id, updatedAt: now }), match: matchState });
+});
+
+app.post("/api/matches/current/target-wins", async (c) => {
+  const current = await ensureCurrentMatch(c);
+
+  if (current.response) {
+    return current.response;
+  }
+
+  const payload = await readJson<{ value?: unknown }>(c);
+  const parsedValue = parseInteger(payload?.value);
+
+  if (parsedValue == null) {
+    return c.json({ error: "目标局数必须是整数" }, 400);
+  }
+
+  const nextTargetWins = clamp(parsedValue, 1, MAX_TARGET_WINS);
+  const db = getDatabase(c);
+  const now = new Date();
+
+  await db
+    .update(matches)
+    .set({
+      targetWins: nextTargetWins,
+      updatedAt: now,
+    })
+    .where(eq(matches.id, current.context!.match.id));
+
+  return respondWithCurrentState(c, current.user!);
+});
+
+app.post("/api/matches/current/frames/:frameNumber/winner", async (c) => {
+  const current = await ensureCurrentMatch(c);
+
+  if (current.response) {
+    return current.response;
+  }
+
+  const payload = await readJson<{ slot?: unknown }>(c);
+  const frameNumber = Number(c.req.param("frameNumber"));
+
+  if (!Number.isInteger(frameNumber) || frameNumber <= 0) {
+    return c.json({ error: "局数不正确" }, 400);
+  }
+
+  const slot = payload?.slot === null ? null : parseInteger(payload?.slot);
+
+  if (slot !== null && slot !== 1 && slot !== 2) {
+    return c.json({ error: "胜利方必须是 1、2 或空值" }, 400);
+  }
+
+  const db = getDatabase(c);
+  const frame = await db
+    .select()
+    .from(frames)
+    .where(and(eq(frames.matchId, current.context!.match.id), eq(frames.frameNumber, frameNumber)))
+    .get();
+
+  if (!frame) {
+    return c.json({ error: "没有找到这一局" }, 404);
+  }
+
+  const now = new Date();
+  await db
+    .update(frames)
+    .set({
+      winnerSlot: slot,
+      updatedAt: now,
+    })
+    .where(eq(frames.id, frame.id));
+
+  await db
+    .update(matches)
+    .set({
+      updatedAt: now,
+    })
+    .where(eq(matches.id, current.context!.match.id));
+
+  return respondWithCurrentState(c, current.user!);
+});
+
+app.post("/api/matches/current/frames/:frameNumber/fouls", async (c) => {
+  const current = await ensureCurrentMatch(c);
+
+  if (current.response) {
+    return current.response;
+  }
+
+  const payload = await readJson<{ slot?: unknown; value?: unknown }>(c);
+  const frameNumber = Number(c.req.param("frameNumber"));
+  const slot = parseInteger(payload?.slot);
+  const value = parseInteger(payload?.value);
+
+  if (!Number.isInteger(frameNumber) || frameNumber <= 0) {
+    return c.json({ error: "局数不正确" }, 400);
+  }
+
+  if (slot !== 1 && slot !== 2) {
+    return c.json({ error: "犯规方必须是 1 或 2" }, 400);
+  }
+
+  if (value == null) {
+    return c.json({ error: "犯规次数必须是整数" }, 400);
+  }
+
+  const nextValue = clamp(value, 0, MAX_FOULS);
+  const db = getDatabase(c);
+  const frame = await db
+    .select()
+    .from(frames)
+    .where(and(eq(frames.matchId, current.context!.match.id), eq(frames.frameNumber, frameNumber)))
+    .get();
+
+  if (!frame) {
+    return c.json({ error: "没有找到这一局" }, 404);
+  }
+
+  const now = new Date();
+  await db
+    .update(frames)
+    .set({
+      ...(slot === 1 ? { player1Fouls: nextValue } : { player2Fouls: nextValue }),
+      updatedAt: now,
+    })
+    .where(eq(frames.id, frame.id));
+
+  await db
+    .update(matches)
+    .set({
+      updatedAt: now,
+    })
+    .where(eq(matches.id, current.context!.match.id));
+
+  return respondWithCurrentState(c, current.user!);
+});
+
+app.post("/api/matches/current/reset", async (c) => {
+  const current = await ensureCurrentMatch(c);
+
+  if (current.response) {
+    return current.response;
+  }
+
+  const db = getDatabase(c);
+  const now = new Date();
+
+  await db.delete(frames).where(eq(frames.matchId, current.context!.match.id));
+  await db.insert(frames).values({
+    matchId: current.context!.match.id,
+    frameNumber: 1,
+    winnerSlot: null,
+    player1Fouls: 0,
+    player2Fouls: 0,
+    createdAt: now,
+    updatedAt: now,
+  });
+  await db
+    .update(matches)
+    .set({
+      targetWins: DEFAULT_TARGET_WINS,
+      updatedAt: now,
+    })
+    .where(eq(matches.id, current.context!.match.id));
+
+  return respondWithCurrentState(c, current.user!);
+});
+
+app.post("/api/matches/current/leave", async (c) => {
+  const current = await ensureCurrentMatch(c);
+
+  if (current.response) {
+    return current.response;
+  }
+
+  const db = getDatabase(c);
+  const now = new Date();
+  const updates = current.context!.slot === 1
+    ? { player1UserId: null, player1Name: null, updatedAt: now }
+    : { player2UserId: null, player2Name: null, updatedAt: now };
+
+  await db.update(matches).set(updates).where(eq(matches.id, current.context!.match.id));
+  await db
+    .update(users)
+    .set({
+      currentMatchId: null,
+      updatedAt: now,
+    })
+    .where(eq(users.id, current.user!.id));
+
+  const updatedMatch = await db.select().from(matches).where(eq(matches.id, current.context!.match.id)).get();
+
+  if (updatedMatch && !updatedMatch.player1UserId && !updatedMatch.player2UserId) {
+    await db.delete(frames).where(eq(frames.matchId, updatedMatch.id));
+    await db.delete(matches).where(eq(matches.id, updatedMatch.id));
+  }
+
+  return c.json({
+    user: serializeUser({ ...current.user!, currentMatchId: null, updatedAt: now }),
+    match: null,
+  });
+});
+
+app.delete("/api/session", async (c) => {
+  await clearSession(c);
   return c.json({ ok: true });
 });
 
