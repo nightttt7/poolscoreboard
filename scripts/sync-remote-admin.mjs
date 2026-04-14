@@ -1,7 +1,8 @@
 import { pbkdf2Sync, randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
 
-import { ADMIN_USERNAME, PASSWORD_HASH_ITERATIONS } from "../shared/admin-auth-config.js";
+const ADMIN_USERNAME = "admin";
+const PASSWORD_HASH_ITERATIONS = 4000;
 
 function runWrangler(args) {
   const command = process.platform === "win32" ? "npx.cmd" : "npx";

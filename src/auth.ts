@@ -2,8 +2,6 @@ import { and, eq, gt } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import type { Context } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
-
-import { ADMIN_USERNAME, PASSWORD_HASH_ITERATIONS } from "../shared/admin-auth-config.js";
 import { sessions, users, type User } from "./db/schema";
 
 type Bindings = {
@@ -13,6 +11,8 @@ type Bindings = {
 
 type AppContext = Context<{ Bindings: Bindings }>;
 
+const ADMIN_USERNAME = "admin";
+const PASSWORD_HASH_ITERATIONS = 4000;
 const encoder = new TextEncoder();
 const SESSION_COOKIE_NAME = "session";
 const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 30;
