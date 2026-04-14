@@ -15,11 +15,12 @@
    - `CLOUDFLARE_ACCOUNT_ID`
    - `ADMIN_PASSWORD`
 
-> 这个仓库仍沿用模板的部署凭据约定，避免本地和 GitHub Actions 各走一套配置；其中 `ADMIN_PASSWORD` 仅为保留模板 deploy 流程兼容性，不用于当前计分板的人机交互。
+> 这个仓库仍沿用模板的部署凭据约定，避免本地和 GitHub Actions 各走一套配置；其中 `ADMIN_PASSWORD` 会同步到保留的 `admin` 账号，并作为页面上的 Admin 登录入口密码。
 
 ## 当前产品行为
 
 - 玩家只需要填写名字，不需要账号密码登录
+- 同时保留一个固定 `admin` 账号，并提供单独的 Admin 登录入口
 - 身份通过数据库保存的 Cookie 会话校验
 - 一个玩家同一时间只能在一场比赛里
 - 创建比赛时会优先生成随机两位数编号；两位数用满后会自动扩展到更多位

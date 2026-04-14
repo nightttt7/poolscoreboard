@@ -1,8 +1,7 @@
 import { pbkdf2Sync, randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
 
-const ADMIN_USERNAME = "admin";
-const PASSWORD_HASH_ITERATIONS = 4000;
+import { ADMIN_USERNAME, PASSWORD_HASH_ITERATIONS } from "../shared/admin-auth-config.js";
 
 function runWrangler(args) {
   const command = process.platform === "win32" ? "npx.cmd" : "npx";
@@ -47,11 +46,14 @@ runWrangler([
   "--remote",
   "--command",
   [
-    "INSERT INTO users (username, password_salt, password_hash, created_at)",
-    `VALUES (${adminUsernameSql}, ${passwordSaltSql}, ${passwordHashSql}, CAST(strftime('%s', 'now') AS integer) * 1000)`,
+    "INSERT INTO users (name, current_match_id, username, password_salt, password_hash, created_at, updated_at)",
+    `VALUES (${adminUsernameSql}, NULL, ${adminUsernameSql}, ${passwordSaltSql}, ${passwordHashSql}, CAST(strftime('%s', 'now') AS integer) * 1000, CAST(strftime('%s', 'now') AS integer) * 1000)`,
     "ON CONFLICT(username) DO UPDATE SET",
+    `name = ${adminUsernameSql},`,
+    "current_match_id = NULL,",
     `password_salt = ${passwordSaltSql},`,
-    `password_hash = ${passwordHashSql};`,
+    `password_hash = ${passwordHashSql},`,
+    "updated_at = CAST(strftime('%s', 'now') AS integer) * 1000;",
   ].join(" "),
 ]);
 

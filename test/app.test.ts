@@ -17,8 +17,9 @@ async function resetDatabase() {
   await env.DB.exec("DROP TABLE IF EXISTS sessions");
   await env.DB.exec("DROP TABLE IF EXISTS users");
   await env.DB.exec(
-    "CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, current_match_id TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)"
+    "CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, current_match_id TEXT, username TEXT, password_salt TEXT, password_hash TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)"
   );
+  await env.DB.exec("CREATE UNIQUE INDEX users_username_unique ON users (username)");
   await env.DB.exec(
     "CREATE TABLE sessions (id TEXT PRIMARY KEY NOT NULL, user_id INTEGER NOT NULL, token_hash TEXT NOT NULL UNIQUE, expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL, FOREIGN KEY (user_id) REFERENCES users(id))"
   );
@@ -48,6 +49,7 @@ describe("pool scoreboard app", () => {
     expect(html).toContain(PROJECT_NAME);
     expect(html).toContain("双人台球计分板");
     expect(html).toContain("开启新比赛");
+    expect(html).toContain("Admin 登录");
   });
 
   it("requires a cookie-backed session before mutating match data", async () => {
@@ -62,6 +64,43 @@ describe("pool scoreboard app", () => {
     );
 
     expect(res.status).toBe(401);
+  });
+
+  it("keeps a separate admin login entry and blocks admin from joining matches", async () => {
+    const loginRes = await app.request(
+      "http://localhost/api/admin/session",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ password: env.ADMIN_PASSWORD }),
+      },
+      env,
+    );
+
+    expect(loginRes.status).toBe(200);
+    const adminCookie = cookieFrom(loginRes);
+    expect(adminCookie).toBeTruthy();
+    const loginBody = (await loginRes.json()) as { user: { name: string; isAdmin: boolean }; match: null };
+    expect(loginBody).toEqual({
+      user: { name: "admin", isAdmin: true },
+      match: null,
+    });
+
+    const createRes = await app.request(
+      "http://localhost/api/matches",
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          cookie: adminCookie!,
+        },
+        body: JSON.stringify({ name: "Alice" }),
+      },
+      env,
+    );
+
+    expect(createRes.status).toBe(403);
+    await expect(createRes.json()).resolves.toEqual({ error: "管理员账号不能参与比赛" });
   });
 
   it("creates, joins, scores, and announces a match winner", async () => {
