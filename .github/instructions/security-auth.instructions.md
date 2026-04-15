@@ -16,6 +16,7 @@ description: Security and auth rules for poolscoreboard's D1-backed application 
 - The initial admin password comes from the deployed Worker secret `ADMIN_PASSWORD`, and from the local `ADMIN_PASSWORD` environment variable during local development.
 - For local development, document that `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, and `ADMIN_PASSWORD` must be configured as local environment variables instead of hardcoding secrets.
 - For GitHub Actions deploys, fail fast with a clear error if `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, or `ADMIN_PASSWORD` is missing from Actions secrets.
+- For GitHub Actions deploys, after resolving the remote D1 database id, make subsequent remote Wrangler commands use that resolved id instead of the placeholder `wrangler.jsonc` UUID.
 - For GitHub Actions deploys, ensure the workflow uploads or refreshes the Worker secret before deploying code that depends on it.
 - For GitHub Actions deploys, refresh the remote `admin` user's password from `ADMIN_PASSWORD` on every deploy after migrations run.
 - The first login path may lazily create the `admin` row from `ADMIN_PASSWORD`, but keep the source of truth in the Worker secret and local environment variable instead of hardcoding credentials.
