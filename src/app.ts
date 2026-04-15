@@ -673,7 +673,11 @@ function renderHomePage() {
       }
 
       function foulKey(frameNumber, slot) {
-        return frameNumber + ":" + slot;
+        return `${frameNumber}:${slot}`;
+      }
+
+      function foulFrameNumberFromKey(key) {
+        return key.split(":")[0];
       }
 
       function getDisplayedWinnerSlot(frame) {
@@ -706,7 +710,7 @@ function renderHomePage() {
         }
 
         for (const key of Object.keys(state.pendingFouls)) {
-          if (!activeFrames.has(key.split(":")[0])) {
+          if (!activeFrames.has(foulFrameNumberFromKey(key))) {
             delete state.pendingFouls[key];
           }
         }

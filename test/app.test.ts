@@ -221,7 +221,7 @@ describe("pool scoreboard app", () => {
     expect(secondWinBody.match.winnerMessage).toContain("Alice 2 : Bob 0");
   });
 
-  it("treats duplicate foul and winner submissions as idempotent", async () => {
+  it("handles duplicate foul and winner submissions without side effects", async () => {
     const createRes = await app.request(
       "http://localhost/api/matches",
       {
