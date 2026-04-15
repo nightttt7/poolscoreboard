@@ -54,6 +54,32 @@ jobs:
       - name: Ensure remote D1 exists
         run: npm run db:ensure:remote
 
+      - name: Write resolved D1 id into Wrangler config
+        run: |
+          node --input-type=module <<'EOF'
+          import { readFileSync, writeFileSync } from "node:fs";
+
+          const configPath = "wrangler.jsonc";
+          const databaseId = process.env.CLOUDFLARE_D1_DATABASE_ID;
+
+          if (!databaseId) {
+            throw new Error("Missing CLOUDFLARE_D1_DATABASE_ID after db:ensure:remote");
+          }
+
+          const originalConfig = readFileSync(configPath, "utf8");
+          const updatedConfig = originalConfig.replace(
+            /("database_id"\s*:\s*")[^"]+(")/,
+            `$1${databaseId}$2`,
+          );
+
+          if (updatedConfig === originalConfig) {
+            throw new Error(`Failed to update ${configPath} with the resolved D1 database id`);
+          }
+
+          writeFileSync(configPath, updatedConfig);
+          console.log(`Updated ${configPath} to use remote D1 database ${databaseId}`);
+          EOF
+
       - name: Upload worker admin password secret
         run: printf '%s' "$ADMIN_PASSWORD" | npx wrangler secret put ADMIN_PASSWORD --name "$WORKER_NAME"
 
