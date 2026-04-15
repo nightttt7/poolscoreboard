@@ -544,6 +544,9 @@ function renderHomePage() {
         font-size: 0.78rem;
       }
       .target-card { display: grid; gap: 12px; }
+      .target-card.pending, .stepper.pending {
+        border-color: rgba(59, 130, 246, 0.28);
+      }
       .stepper-row {
         display: grid;
         grid-template-columns: 52px minmax(0, 1fr) 52px;
@@ -551,6 +554,9 @@ function renderHomePage() {
         align-items: center;
       }
       .stepper-row button { padding: 14px 0; }
+      .stepper-row.pending button, .stepper-row.pending input {
+        box-shadow: inset 0 0 0 1px rgba(59, 130, 246, 0.18);
+      }
       .stepper-row input {
         text-align: center;
         font-size: 1.15rem;
@@ -579,6 +585,9 @@ function renderHomePage() {
       .win-button {
         min-height: 54px;
         background: rgba(148, 163, 184, 0.18);
+      }
+      .winner-row.pending .win-button {
+        box-shadow: inset 0 0 0 1px rgba(59, 130, 246, 0.22);
       }
       .clear-button {
         padding: 10px 12px;
@@ -629,7 +638,13 @@ function renderHomePage() {
     <script>
       const shell = document.getElementById("app-shell");
       const statusNode = document.getElementById("status");
-      const state = { user: null, match: null, busy: false };
+      const state = {
+        user: null,
+        match: null,
+        targetWinsPending: false,
+        pendingWinners: {},
+        pendingFouls: {},
+      };
 
       function setStatus(message) {
         statusNode.textContent = message;
@@ -641,6 +656,60 @@ function renderHomePage() {
         }
 
         return state.user && state.user.isAdmin ? "已登录管理员账号。" : "准备开始新的比赛。";
+      }
+
+      function resetMatchInteractionState() {
+        state.targetWinsPending = false;
+        state.pendingWinners = {};
+        state.pendingFouls = {};
+      }
+
+      function getFrame(frameNumber) {
+        return state.match ? state.match.frames.find((frame) => frame.number === frameNumber) || null : null;
+      }
+
+      function winnerKey(frameNumber) {
+        return String(frameNumber);
+      }
+
+      function foulKey(frameNumber, slot) {
+        return frameNumber + ":" + slot;
+      }
+
+      function getDisplayedWinnerSlot(frame) {
+        const pending = state.pendingWinners[winnerKey(frame.number)];
+        return pending ? pending.optimisticSlot : frame.winnerSlot;
+      }
+
+      function getDisplayedFoulValue(frame, slot) {
+        const pending = state.pendingFouls[foulKey(frame.number, slot)];
+
+        if (pending) {
+          return pending.optimisticValue;
+        }
+
+        return slot === 1 ? frame.player1Fouls : frame.player2Fouls;
+      }
+
+      function pruneInteractionState() {
+        if (!state.match) {
+          resetMatchInteractionState();
+          return;
+        }
+
+        const activeFrames = new Set(state.match.frames.map((frame) => String(frame.number)));
+
+        for (const key of Object.keys(state.pendingWinners)) {
+          if (!activeFrames.has(key)) {
+            delete state.pendingWinners[key];
+          }
+        }
+
+        for (const key of Object.keys(state.pendingFouls)) {
+          if (!activeFrames.has(key.split(":")[0])) {
+            delete state.pendingFouls[key];
+          }
+        }
       }
 
       function make(tag, options = {}) {
@@ -684,29 +753,36 @@ function renderHomePage() {
           state.user = payload.user;
         }
         if (Object.prototype.hasOwnProperty.call(payload, "match")) {
+          const previousCode = state.match ? state.match.code : null;
           state.match = payload.match;
+
+          if (!state.match || (previousCode && state.match.code !== previousCode)) {
+            resetMatchInteractionState();
+          } else {
+            pruneInteractionState();
+          }
         }
       }
 
       async function runAction(message, task) {
-        if (state.busy) return;
-        state.busy = true;
-        setStatus(message);
+        if (message) {
+          setStatus(message);
+        }
 
         try {
           const payload = await task();
           applyPayload(payload || {});
           render();
           setStatus(readyStatus());
+          return payload;
         } catch (error) {
           setStatus(error instanceof Error ? error.message : "发生未知错误");
-        } finally {
-          state.busy = false;
+          return null;
         }
       }
 
-      function createStepper(value, onCommit, minimum, maximum) {
-        const wrapper = make("div", { className: "stepper-row" });
+      function createStepper(value, onCommit, minimum, maximum, options = {}) {
+        const wrapper = make("div", { className: "stepper-row" + (options.pending ? " pending" : "") });
         const minus = make("button", { text: "-" });
         const input = make("input", {
           type: "number",
@@ -717,6 +793,11 @@ function renderHomePage() {
           inputMode: "numeric"
         });
         const plus = make("button", { text: "+" });
+        const disabled = Boolean(options.disabled);
+
+        minus.disabled = disabled;
+        plus.disabled = disabled;
+        input.disabled = disabled;
 
         minus.addEventListener("click", () => {
           const next = Math.max(minimum, Number(input.value || value) - 1);
@@ -739,6 +820,175 @@ function renderHomePage() {
 
         wrapper.append(minus, input, plus);
         return wrapper;
+      }
+
+      async function commitTargetWins(value) {
+        if (!state.match || state.targetWinsPending || state.match.targetWins === value) {
+          return;
+        }
+
+        state.targetWinsPending = true;
+        render();
+
+        try {
+          await runAction("正在更新目标局数…", () => api("/api/matches/current/target-wins", {
+            method: "POST",
+            body: JSON.stringify({ value })
+          }));
+        } finally {
+          state.targetWinsPending = false;
+          render();
+        }
+      }
+
+      async function flushWinnerUpdate(frameNumber, requestedSlot) {
+        const key = winnerKey(frameNumber);
+        let nextSlot = requestedSlot;
+
+        while (true) {
+          try {
+            const payload = await api("/api/matches/current/frames/" + frameNumber + "/winner", {
+              method: "POST",
+              body: JSON.stringify({ slot: nextSlot })
+            });
+            applyPayload(payload || {});
+          } catch (error) {
+            delete state.pendingWinners[key];
+            render();
+            setStatus(error instanceof Error ? error.message : "发生未知错误");
+            return;
+          }
+
+          const pending = state.pendingWinners[key];
+
+          if (!pending || !pending.hasQueuedSlot) {
+            delete state.pendingWinners[key];
+            render();
+            setStatus(readyStatus());
+            return;
+          }
+
+          nextSlot = pending.queuedSlot;
+          pending.hasQueuedSlot = false;
+
+          const frame = getFrame(frameNumber);
+
+          if (!frame || frame.winnerSlot === nextSlot) {
+            delete state.pendingWinners[key];
+            render();
+            setStatus(readyStatus());
+            return;
+          }
+
+          pending.optimisticSlot = nextSlot;
+          render();
+        }
+      }
+
+      function queueWinnerUpdate(frameNumber, slot) {
+        const frame = getFrame(frameNumber);
+
+        if (!frame) {
+          return;
+        }
+
+        const key = winnerKey(frameNumber);
+        const pending = state.pendingWinners[key];
+
+        if (pending) {
+          pending.optimisticSlot = slot;
+          pending.queuedSlot = slot;
+          pending.hasQueuedSlot = true;
+          render();
+          return;
+        }
+
+        if (frame.winnerSlot === slot) {
+          return;
+        }
+
+        state.pendingWinners[key] = {
+          optimisticSlot: slot,
+          queuedSlot: slot,
+          hasQueuedSlot: false,
+        };
+        render();
+        void flushWinnerUpdate(frameNumber, slot);
+      }
+
+      async function flushFoulUpdate(frameNumber, slot, requestedValue) {
+        const key = foulKey(frameNumber, slot);
+        let nextValue = requestedValue;
+
+        while (true) {
+          try {
+            const payload = await api("/api/matches/current/frames/" + frameNumber + "/fouls", {
+              method: "POST",
+              body: JSON.stringify({ slot, value: nextValue })
+            });
+            applyPayload(payload || {});
+          } catch (error) {
+            delete state.pendingFouls[key];
+            render();
+            setStatus(error instanceof Error ? error.message : "发生未知错误");
+            return;
+          }
+
+          const pending = state.pendingFouls[key];
+
+          if (!pending || !pending.hasQueuedValue) {
+            delete state.pendingFouls[key];
+            render();
+            setStatus(readyStatus());
+            return;
+          }
+
+          nextValue = pending.queuedValue;
+          pending.hasQueuedValue = false;
+
+          const frame = getFrame(frameNumber);
+          const currentValue = frame ? (slot === 1 ? frame.player1Fouls : frame.player2Fouls) : null;
+
+          if (currentValue === nextValue) {
+            delete state.pendingFouls[key];
+            render();
+            setStatus(readyStatus());
+            return;
+          }
+
+          pending.optimisticValue = nextValue;
+        }
+      }
+
+      function queueFoulUpdate(frameNumber, slot, value) {
+        const frame = getFrame(frameNumber);
+
+        if (!frame) {
+          return;
+        }
+
+        const key = foulKey(frameNumber, slot);
+        const currentValue = slot === 1 ? frame.player1Fouls : frame.player2Fouls;
+        const pending = state.pendingFouls[key];
+
+        if (pending) {
+          pending.optimisticValue = value;
+          pending.queuedValue = value;
+          pending.hasQueuedValue = true;
+          return;
+        }
+
+        if (currentValue === value) {
+          return;
+        }
+
+        state.pendingFouls[key] = {
+          optimisticValue: value,
+          queuedValue: value,
+          hasQueuedValue: false,
+        };
+        render();
+        void flushFoulUpdate(frameNumber, slot, value);
       }
 
       function renderLobby() {
@@ -874,43 +1124,41 @@ function renderHomePage() {
         }
 
         const targetCard = make("div", { className: "target-card" });
+        if (state.targetWinsPending) {
+          targetCard.classList.add("pending");
+        }
         targetCard.append(make("h2", { text: "胜利所需局数" }));
         targetCard.append(createStepper(match.targetWins, (value) => {
-          runAction("正在更新目标局数…", () => api("/api/matches/current/target-wins", {
-            method: "POST",
-            body: JSON.stringify({ value })
-          }));
-        }, 1, 99));
+          void commitTargetWins(value);
+        }, 1, 99, { disabled: state.targetWinsPending, pending: state.targetWinsPending }));
         container.append(targetCard);
 
         const frameList = make("div", { className: "frame-list" });
         match.frames.forEach((frame) => {
+          const winnerPending = Boolean(state.pendingWinners[winnerKey(frame.number)]);
+          const displayedWinnerSlot = getDisplayedWinnerSlot(frame);
           const frameCard = make("div", { className: "frame-card" });
           const frameHead = make("div", { className: "frame-head" });
           frameHead.append(make("h3", { text: "第 " + frame.number + " 局" }));
-          if (frame.winnerSlot != null) {
+          if (displayedWinnerSlot != null) {
             const clearButton = make("button", { className: "ghost clear-button", text: "清空胜负" });
+            clearButton.disabled = winnerPending;
             clearButton.addEventListener("click", () => {
-              runAction("正在修改胜负…", () => api("/api/matches/current/frames/" + frame.number + "/winner", {
-                method: "POST",
-                body: JSON.stringify({ slot: null })
-              }));
+              queueWinnerUpdate(frame.number, null);
             });
             frameHead.append(clearButton);
           }
           frameCard.append(frameHead);
 
-          const winnerRow = make("div", { className: "winner-row" });
+          const winnerRow = make("div", { className: "winner-row" + (winnerPending ? " pending" : "") });
           match.players.forEach((player) => {
             const button = make("button", {
-              className: "win-button" + (frame.winnerSlot === player.slot ? " active" : ""),
+              className: "win-button" + (displayedWinnerSlot === player.slot ? " active" : ""),
               text: (player.name || ("玩家" + player.slot)) + " · win"
             });
+            button.disabled = winnerPending;
             button.addEventListener("click", () => {
-              runAction("正在记录胜负…", () => api("/api/matches/current/frames/" + frame.number + "/winner", {
-                method: "POST",
-                body: JSON.stringify({ slot: player.slot })
-              }));
+              queueWinnerUpdate(frame.number, player.slot);
             });
             winnerRow.append(button);
           });
@@ -918,15 +1166,13 @@ function renderHomePage() {
 
           const foulGrid = make("div", { className: "foul-grid" });
           match.players.forEach((player) => {
-            const stepperCard = make("div", { className: "stepper" });
+            const foulPending = Boolean(state.pendingFouls[foulKey(frame.number, player.slot)]);
+            const stepperCard = make("div", { className: "stepper" + (foulPending ? " pending" : "") });
             stepperCard.append(make("p", { text: (player.name || ("玩家" + player.slot)) + " 犯规" }));
-            const value = player.slot === 1 ? frame.player1Fouls : frame.player2Fouls;
+            const value = getDisplayedFoulValue(frame, player.slot);
             stepperCard.append(createStepper(value, (next) => {
-              runAction("正在更新犯规次数…", () => api("/api/matches/current/frames/" + frame.number + "/fouls", {
-                method: "POST",
-                body: JSON.stringify({ slot: player.slot, value: next })
-              }));
-            }, 0, 99));
+              queueFoulUpdate(frame.number, player.slot, next);
+            }, 0, 99, { pending: foulPending }));
             foulGrid.append(stepperCard);
           });
           frameCard.append(foulGrid);
@@ -1181,6 +1427,11 @@ app.post("/api/matches/current/target-wins", async (c) => {
 
   const nextTargetWins = clamp(parsedValue, 1, MAX_TARGET_WINS);
   const db = getDatabase(c);
+
+  if (current.context!.match.targetWins === nextTargetWins) {
+    return respondWithCurrentState(c, current.user!);
+  }
+
   const now = new Date();
 
   await db
@@ -1223,6 +1474,10 @@ app.post("/api/matches/current/frames/:frameNumber/winner", async (c) => {
 
   if (!frame) {
     return c.json({ error: "没有找到这一局" }, 404);
+  }
+
+  if (frame.winnerSlot === slot) {
+    return respondWithCurrentState(c, current.user!);
   }
 
   const now = new Date();
@@ -1278,6 +1533,12 @@ app.post("/api/matches/current/frames/:frameNumber/fouls", async (c) => {
 
   if (!frame) {
     return c.json({ error: "没有找到这一局" }, 404);
+  }
+
+  const currentValue = slot === 1 ? frame.player1Fouls : frame.player2Fouls;
+
+  if (currentValue === nextValue) {
+    return respondWithCurrentState(c, current.user!);
   }
 
   const now = new Date();

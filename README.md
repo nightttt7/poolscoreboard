@@ -50,6 +50,11 @@ npm test
 npm run typecheck
 ```
 
+## 后续计划（暂不实现）
+
+- 如果后续需要让用户 A 的更新更快出现在用户 B 页面上，先评估短轮询。
+- 只有在确实需要更强的实时协作时，再升级到 Durable Objects / WebSocket。
+
 ## 部署
 
 用户把改动推送到 `main` 后，现有 GitHub Actions 会继续执行：安装依赖、跑 typecheck / test、执行远程 migration、同步 `ADMIN_PASSWORD`、再部署 Worker。

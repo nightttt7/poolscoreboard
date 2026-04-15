@@ -221,6 +221,105 @@ describe("pool scoreboard app", () => {
     expect(secondWinBody.match.winnerMessage).toContain("Alice 2 : Bob 0");
   });
 
+  it("treats duplicate foul and winner submissions as idempotent", async () => {
+    const createRes = await app.request(
+      "http://localhost/api/matches",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "Alice" }),
+      },
+      env,
+    );
+    const createBody = (await createRes.json()) as { match: { code: string } };
+    const aliceCookie = cookieFrom(createRes)!;
+
+    const joinRes = await app.request(
+      "http://localhost/api/matches/join",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "Bob", code: createBody.match.code }),
+      },
+      env,
+    );
+    const bobCookie = cookieFrom(joinRes)!;
+
+    const foulRes = await app.request(
+      "http://localhost/api/matches/current/frames/1/fouls",
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          cookie: bobCookie,
+        },
+        body: JSON.stringify({ slot: 2, value: 2 }),
+      },
+      env,
+    );
+    expect(foulRes.status).toBe(200);
+
+    const repeatedFoulRes = await app.request(
+      "http://localhost/api/matches/current/frames/1/fouls",
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          cookie: bobCookie,
+        },
+        body: JSON.stringify({ slot: 2, value: 2 }),
+      },
+      env,
+    );
+    const repeatedFoulBody = (await repeatedFoulRes.json()) as {
+      match: {
+        frames: Array<{ number: number; player2Fouls: number }>;
+      };
+    };
+
+    expect(repeatedFoulRes.status).toBe(200);
+    expect(repeatedFoulBody.match.frames[0]).toMatchObject({ number: 1, player2Fouls: 2 });
+
+    const winRes = await app.request(
+      "http://localhost/api/matches/current/frames/1/winner",
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          cookie: aliceCookie,
+        },
+        body: JSON.stringify({ slot: 1 }),
+      },
+      env,
+    );
+    expect(winRes.status).toBe(200);
+
+    const repeatedWinRes = await app.request(
+      "http://localhost/api/matches/current/frames/1/winner",
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          cookie: aliceCookie,
+        },
+        body: JSON.stringify({ slot: 1 }),
+      },
+      env,
+    );
+    const repeatedWinBody = (await repeatedWinRes.json()) as {
+      match: {
+        frames: Array<{ number: number; winnerSlot: number | null; player2Fouls: number }>;
+        totalWins: { 1: number; 2: number };
+      };
+    };
+
+    expect(repeatedWinRes.status).toBe(200);
+    expect(repeatedWinBody.match.totalWins).toEqual({ 1: 1, 2: 0 });
+    expect(repeatedWinBody.match.frames).toHaveLength(2);
+    expect(repeatedWinBody.match.frames[0]).toMatchObject({ number: 1, winnerSlot: 1, player2Fouls: 2 });
+    expect(repeatedWinBody.match.frames[1]).toMatchObject({ number: 2, winnerSlot: null });
+  });
+
   it("limits each user to one match and each match to two active players", async () => {
     const createRes = await app.request(
       "http://localhost/api/matches",
