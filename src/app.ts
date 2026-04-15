@@ -673,7 +673,7 @@ function renderHomePage() {
       }
 
       function foulKey(frameNumber, slot) {
-        return `${frameNumber}:${slot}`;
+        return frameNumber + ":" + slot;
       }
 
       function foulFrameNumberFromKey(key) {
