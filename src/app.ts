@@ -601,13 +601,6 @@ function renderHomePage() {
         border: 1px solid rgba(34, 197, 94, 0.28);
         font-weight: 700;
       }
-      .danger-note {
-        padding: 12px 14px;
-        border-radius: 18px;
-        background: var(--danger-soft);
-        color: #fecaca;
-        border: 1px solid rgba(239, 68, 68, 0.28);
-      }
       .empty-seat {
         padding: 12px 14px;
         border-radius: 18px;
@@ -627,13 +620,13 @@ function renderHomePage() {
       <section class="panel hero">
         <span class="badge">手机优先 · 双人台球计分板</span>
         <h1>${PROJECT_NAME}</h1>
-        <p>玩家输入名字即可开始；同时保留一个 Admin 登录入口，供后续管理功能使用。数据库会记录比赛、局数、犯规和当前所在比赛，身份通过 Cookie 会话校验。</p>
+        <p>输入名字即可开始，对手通过比赛编号加入。</p>
       </section>
       <section class="panel">
         <div class="status" id="status">正在连接…</div>
       </section>
       <section class="panel" id="app-shell"></section>
-      <p class="footer-note">Worker: ${PROJECT_NAME}</p>
+      <p class="footer-note">${PROJECT_NAME}</p>
     </main>
     <script>
       const shell = document.getElementById("app-shell");
@@ -1046,14 +1039,14 @@ function renderHomePage() {
         const adminCard = make("div", { className: "frame-card" });
         adminCard.append(
           make("h2", { text: "Admin 登录" }),
-          make("p", { text: "保留账号 admin，后续需要管理功能时可直接使用。" })
+          make("p", { text: "如需管理功能，可在此登录。" })
         );
         const adminPasswordField = make("label", { className: "field" });
         adminPasswordField.append(
           make("span", { text: "管理员密码" }),
           make("input", {
             type: "password",
-            placeholder: "输入 ADMIN_PASSWORD"
+            placeholder: "管理员密码"
           })
         );
         const adminPasswordInput = adminPasswordField.querySelector("input");
@@ -1076,7 +1069,7 @@ function renderHomePage() {
         const card = make("div", { className: "frame-card" });
         card.append(
           make("h2", { text: "Admin 已登录" }),
-          make("p", { text: "当前保留的是管理员账号 admin。普通比赛仍使用玩家名字 + Cookie 会话。" })
+          make("p", { text: "管理员功能尚在开发中。" })
         );
         const logoutButton = make("button", { className: "ghost", text: "退出 Admin" });
         logoutButton.addEventListener("click", () => {
@@ -1197,7 +1190,6 @@ function renderHomePage() {
         });
         actions.append(leaveButton, resetButton);
         container.append(actions);
-        container.append(make("div", { className: "danger-note", text: "比赛 6 小时无人操作时会被自动清理；两个玩家都退出后也会删除。" }));
         shell.append(container);
       }
 
