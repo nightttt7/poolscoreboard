@@ -433,13 +433,20 @@ function notifyMatchRoom(c: AppContext, matchId: string) {
   }
 }
 
-function renderHomePage() {
+function renderHomePage(pageMode: "lobby" | "admin" = "lobby") {
+  const isAdminPage = pageMode === "admin";
+  const pageTitle = isAdminPage ? `${PROJECT_NAME} Admin` : PROJECT_NAME;
+  const heroBadge = isAdminPage ? "Admin 入口 · 固定账号" : "手机优先 · 双人台球计分板";
+  const heroDescription = isAdminPage
+    ? "使用固定 admin 账号进入独立管理页面。"
+    : "输入名字即可开始，对手通过比赛编号加入。";
+
   return `<!DOCTYPE html>
 <html lang="zh-CN">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>${PROJECT_NAME}</title>
+    <title>${pageTitle}</title>
     <style>
       :root {
         color-scheme: light;
@@ -649,9 +656,9 @@ function renderHomePage() {
   <body>
     <main class="stack">
       <section class="panel hero">
-        <span class="badge">手机优先 · 双人台球计分板</span>
+        <span class="badge">${heroBadge}</span>
         <h1>${PROJECT_NAME}</h1>
-        <p>输入名字即可开始，对手通过比赛编号加入。</p>
+        <p>${heroDescription}</p>
       </section>
       <section class="panel">
         <div class="status" id="status">正在连接…</div>
@@ -660,6 +667,7 @@ function renderHomePage() {
       <p class="footer-note">${PROJECT_NAME}</p>
     </main>
     <script>
+      const pageMode = ${JSON.stringify(pageMode)};
       const shell = document.getElementById("app-shell");
       const statusNode = document.getElementById("status");
       const state = {
@@ -679,7 +687,11 @@ function renderHomePage() {
           return "已同步比赛状态。";
         }
 
-        return state.user && state.user.isAdmin ? "已登录管理员账号。" : "准备开始新的比赛。";
+        if (pageMode === "admin") {
+          return state.user && state.user.isAdmin ? "已登录管理员账号。" : "请登录管理员账号。";
+        }
+
+        return state.user && state.user.isAdmin ? "管理员账号请使用独立 Admin 页面。" : "准备开始新的比赛。";
       }
 
       function resetMatchInteractionState() {
@@ -752,6 +764,17 @@ function renderHomePage() {
         if (options.max != null) node.max = String(options.max);
         if (options.inputMode) node.inputMode = options.inputMode;
         return node;
+      }
+
+      function goTo(path) {
+        window.location.href = path;
+      }
+
+      function logoutSession(pendingMessage) {
+        runAction(pendingMessage, async () => {
+          await api("/api/session", { method: "DELETE" });
+          return { user: null, match: null };
+        });
       }
 
       async function parsePayload(response) {
@@ -1019,6 +1042,88 @@ function renderHomePage() {
         void flushFoulUpdate(frameNumber, slot, value);
       }
 
+${isAdminPage ? `
+      function renderAdminLogin() {
+        shell.replaceChildren();
+        const container = make("div", { className: "match-stack" });
+        const card = make("div", { className: "frame-card" });
+        card.append(
+          make("h2", { text: "Admin 登录" }),
+          make("p", { text: "独立管理员入口不会干扰首页的玩家输入。" })
+        );
+        const adminAutofillAnchor = make("input", { value: "admin" });
+        adminAutofillAnchor.name = "username";
+        adminAutofillAnchor.autocomplete = "username";
+        adminAutofillAnchor.tabIndex = -1;
+        adminAutofillAnchor.readOnly = true;
+        adminAutofillAnchor.setAttribute("aria-hidden", "true");
+        adminAutofillAnchor.style.position = "absolute";
+        adminAutofillAnchor.style.inlineSize = "1px";
+        adminAutofillAnchor.style.blockSize = "1px";
+        adminAutofillAnchor.style.opacity = "0";
+        adminAutofillAnchor.style.pointerEvents = "none";
+
+        const adminPasswordField = make("label", { className: "field" });
+        adminPasswordField.append(
+          make("span", { text: "管理员密码" }),
+          make("input", {
+            type: "password",
+            placeholder: "管理员密码"
+          })
+        );
+        const adminPasswordInput = adminPasswordField.querySelector("input");
+        adminPasswordInput.name = "admin-password";
+        adminPasswordInput.autocomplete = "current-password";
+
+        const actions = make("div", { className: "button-row" });
+        const backButton = make("button", { className: "ghost", text: "返回首页" });
+        backButton.addEventListener("click", () => {
+          goTo("/");
+        });
+        const adminLoginButton = make("button", { className: "primary", text: "Admin 登录" });
+        adminLoginButton.addEventListener("click", () => {
+          runAction("正在登录管理员…", () => api("/api/admin/session", {
+            method: "POST",
+            body: JSON.stringify({ password: adminPasswordInput.value })
+          }));
+        });
+        actions.append(backButton, adminLoginButton);
+        card.append(adminAutofillAnchor, adminPasswordField, actions);
+        container.append(card);
+        shell.append(container);
+      }
+
+      function renderAdminHome() {
+        shell.replaceChildren();
+        const container = make("div", { className: "match-stack" });
+        const card = make("div", { className: "frame-card" });
+        card.append(
+          make("h2", { text: "Admin 已登录" }),
+          make("p", { text: "管理员功能尚在开发中。" })
+        );
+        const actions = make("div", { className: "button-row" });
+        const backButton = make("button", { className: "ghost", text: "返回首页" });
+        backButton.addEventListener("click", () => {
+          goTo("/");
+        });
+        const logoutButton = make("button", { className: "ghost", text: "退出 Admin" });
+        logoutButton.addEventListener("click", () => {
+          logoutSession("正在退出管理员…");
+        });
+        actions.append(backButton, logoutButton);
+        card.append(actions);
+        container.append(card);
+        shell.append(container);
+      }
+
+      function renderSignedOutView() {
+        renderAdminLogin();
+      }
+
+      function renderSignedInAdminView() {
+        renderAdminHome();
+      }
+` : `
       function renderLobby() {
         shell.replaceChildren();
         const container = make("div", { className: "lobby-grid" });
@@ -1075,63 +1180,50 @@ function renderHomePage() {
 
         const adminCard = make("div", { className: "frame-card" });
         adminCard.append(
-          make("h2", { text: "Admin 登录" }),
-          make("p", { text: "如需管理功能，可在此登录。" })
+          make("h2", { text: "Admin 入口" }),
+          make("p", { text: "管理员功能已移到独立页面，首页不再显示密码输入框。" })
         );
-        const adminAutofillAnchor = make("input", { value: "admin" });
-        adminAutofillAnchor.name = "username";
-        adminAutofillAnchor.autocomplete = "username";
-        adminAutofillAnchor.tabIndex = -1;
-        adminAutofillAnchor.readOnly = true;
-        adminAutofillAnchor.setAttribute("aria-hidden", "true");
-        adminAutofillAnchor.style.position = "absolute";
-        adminAutofillAnchor.style.inlineSize = "1px";
-        adminAutofillAnchor.style.blockSize = "1px";
-        adminAutofillAnchor.style.opacity = "0";
-        adminAutofillAnchor.style.pointerEvents = "none";
-        const adminPasswordField = make("label", { className: "field" });
-        adminPasswordField.append(
-          make("span", { text: "管理员密码" }),
-          make("input", {
-            type: "password",
-            placeholder: "管理员密码"
-          })
-        );
-        const adminPasswordInput = adminPasswordField.querySelector("input");
-        adminPasswordInput.name = "admin-password";
-        adminPasswordInput.autocomplete = "current-password";
-        const adminLoginButton = make("button", { className: "ghost", text: "Admin 登录" });
-        adminLoginButton.addEventListener("click", () => {
-          runAction("正在登录管理员…", () => api("/api/admin/session", {
-            method: "POST",
-            body: JSON.stringify({ password: adminPasswordInput.value })
-          }));
+        const adminOpenButton = make("button", { className: "ghost", text: "前往 Admin 页面" });
+        adminOpenButton.addEventListener("click", () => {
+          goTo("/admin");
         });
-        adminCard.append(adminAutofillAnchor, adminPasswordField, adminLoginButton);
+        adminCard.append(adminOpenButton);
 
         container.append(intro, nameField, createButton, joinCard, adminCard);
         shell.append(container);
       }
 
-      function renderAdminHome() {
+      function renderAdminPortal() {
         shell.replaceChildren();
         const container = make("div", { className: "match-stack" });
         const card = make("div", { className: "frame-card" });
         card.append(
-          make("h2", { text: "Admin 已登录" }),
-          make("p", { text: "管理员功能尚在开发中。" })
+          make("h2", { text: "Admin 入口" }),
+          make("p", { text: "当前已登录管理员账号，请在独立页面继续管理。" })
         );
+        const actions = make("div", { className: "button-row" });
+        const openButton = make("button", { className: "primary", text: "进入 Admin 页面" });
+        openButton.addEventListener("click", () => {
+          goTo("/admin");
+        });
         const logoutButton = make("button", { className: "ghost", text: "退出 Admin" });
         logoutButton.addEventListener("click", () => {
-          runAction("正在退出管理员…", async () => {
-            await api("/api/session", { method: "DELETE" });
-            return { user: null, match: null };
-          });
+          logoutSession("正在退出管理员…");
         });
-        card.append(logoutButton);
+        actions.append(openButton, logoutButton);
+        card.append(actions);
         container.append(card);
         shell.append(container);
       }
+
+      function renderSignedOutView() {
+        renderLobby();
+      }
+
+      function renderSignedInAdminView() {
+        renderAdminPortal();
+      }
+`}
 
       function renderMatch() {
         shell.replaceChildren();
@@ -1244,12 +1336,12 @@ function renderHomePage() {
       }
 
       function render() {
-        if (state.user && state.user.isAdmin) {
-          renderAdminHome();
-        } else if (state.match) {
+        if (state.match) {
           renderMatch();
+        } else if (state.user && state.user.isAdmin) {
+          renderSignedInAdminView();
         } else {
-          renderLobby();
+          renderSignedOutView();
         }
         syncRealtime();
       }
@@ -1366,7 +1458,7 @@ function renderHomePage() {
       }
 
       loadSession().catch((error) => {
-        renderLobby();
+        renderSignedOutView();
         setStatus(error instanceof Error ? error.message : "连接失败");
       });
     </script>
@@ -1374,7 +1466,9 @@ function renderHomePage() {
 </html>`;
 }
 
-app.get("/", (c) => c.html(renderHomePage()));
+app.get("/", (c) => c.html(renderHomePage("lobby")));
+
+app.get("/admin", (c) => c.html(renderHomePage("admin")));
 
 app.get("/health", (c) => c.json({ ok: true, projectName: PROJECT_NAME, workerName: PROJECT_NAME }));
 

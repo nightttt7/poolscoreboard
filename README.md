@@ -15,13 +15,12 @@
    - `CLOUDFLARE_ACCOUNT_ID`
    - `ADMIN_PASSWORD`
 
-> 本地开发和 GitHub Actions 共用同一组凭据；其中 `ADMIN_PASSWORD` 会同步到保留的 `admin` 账号，并作为页面上的 Admin 登录入口密码。
+> 本地开发和 GitHub Actions 共用同一组凭据；其中 `ADMIN_PASSWORD` 会同步到保留的 `admin` 账号，并作为 `/admin` 页面上的 Admin 登录密码。
 
 ## 当前产品行为
 
 - 玩家只需要填写名字，不需要账号密码登录
-- 同时保留一个固定 `admin` 账号，并提供单独的 Admin 登录入口
-- 大厅页会把玩家输入和 Admin 登录的浏览器 autofill 提示分开，避免把保存的 `admin` 账号误填进玩家名或比赛编号
+- 同时保留一个固定 `admin` 账号，并在 `/admin` 提供独立的 Admin 登录页面
 - 身份通过数据库保存的 Cookie 会话校验
 - 一个玩家同一时间只能在一场比赛里
 - 创建比赛时会优先生成随机两位数编号；两位数用满后会自动扩展到更多位

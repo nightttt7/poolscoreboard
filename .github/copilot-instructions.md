@@ -5,6 +5,7 @@
 - All write operations against app data must remain behind database-backed authentication. Do not re-open public write access to D1-backed routes unless the user explicitly asks for it.
 - The initial admin account is `admin`; its initial password comes from the `ADMIN_PASSWORD` Worker secret and local shell environment variables. Do not replace this with a hardcoded password in source.
 - Keep the admin bootstrap simple: lazily create the `admin` user during login instead of adding separate migration bootstrap scripts unless the user explicitly asks for them.
+- Preserve the dedicated `/admin` login page. Do not reintroduce a visible admin password field on the homepage, and keep homepage player inputs treated as non-credential fields.
 - When changing schema, auth, deployment, or project workflow, update the relevant instruction files in the same change. Instructions in this repo are expected to evolve continuously with the project.
 - Keep README short and human-focused. Put the most emphasis on steps AI cannot complete automatically, especially GitHub secrets, Cloudflare credentials, and local secret files.
 

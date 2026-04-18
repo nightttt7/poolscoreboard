@@ -42,7 +42,7 @@ describe("pool scoreboard app", () => {
     await resetDatabase();
   });
 
-  it("renders the scoreboard shell", async () => {
+  it("renders the player shell without the admin password field", async () => {
     const res = await app.request("http://localhost/", undefined, env);
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toContain("text/html");
@@ -51,8 +51,21 @@ describe("pool scoreboard app", () => {
     expect(html).toContain(PROJECT_NAME);
     expect(html).toContain("双人台球计分板");
     expect(html).toContain("开启新比赛");
-    expect(html).toContain("Admin 登录");
+    expect(html).toContain("前往 Admin 页面");
+    expect(html).not.toContain("管理员密码");
     expect(html).toContain("grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));");
+  });
+
+  it("renders a dedicated admin page", async () => {
+    const res = await app.request("http://localhost/admin", undefined, env);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("text/html");
+
+    const html = await res.text();
+    expect(html).toContain(`${PROJECT_NAME} Admin`);
+    expect(html).toContain("Admin 入口 · 固定账号");
+    expect(html).toContain("管理员密码");
+    expect(html).toContain("返回首页");
   });
 
   it("requires a cookie-backed session before mutating match data", async () => {
