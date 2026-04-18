@@ -5,7 +5,7 @@ description: Project workflow, naming, deployment, and operator-boundary rules f
 
 ## Project Workflow
 
-- Treat this repository as the standalone `poolscoreboard` service, not as a reusable template.
+- Treat this repository as the standalone `poolscoreboard` service.
 - Preserve the naming convention:
   - Worker name: `poolscoreboard`
   - D1 database name: `poolscoreboard-prod`
