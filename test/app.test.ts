@@ -51,8 +51,8 @@ describe("pool scoreboard app", () => {
     expect(html).toContain(PROJECT_NAME);
     expect(html).toContain("双人台球计分板");
     expect(html).toContain("开启新比赛");
-    expect(html).toContain("前往 Admin 页面");
     expect(html).not.toContain("管理员密码");
+    expect(html).not.toContain("前往 Admin 页面");
     expect(html).toContain("grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));");
   });
 

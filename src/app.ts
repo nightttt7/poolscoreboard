@@ -1178,18 +1178,7 @@ ${isAdminPage ? `
         });
         joinCard.append(codeField, joinButton);
 
-        const adminCard = make("div", { className: "frame-card" });
-        adminCard.append(
-          make("h2", { text: "Admin 入口" }),
-          make("p", { text: "管理员功能已移到独立页面，首页不再显示密码输入框。" })
-        );
-        const adminOpenButton = make("button", { className: "ghost", text: "前往 Admin 页面" });
-        adminOpenButton.addEventListener("click", () => {
-          goTo("/admin");
-        });
-        adminCard.append(adminOpenButton);
-
-        container.append(intro, nameField, createButton, joinCard, adminCard);
+        container.append(intro, nameField, createButton, joinCard);
         shell.append(container);
       }
 
