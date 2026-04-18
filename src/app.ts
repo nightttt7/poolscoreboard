@@ -5,10 +5,14 @@ import { Hono } from "hono";
 
 import { clearSession, getAuthenticatedUser, isAdminUser, loginAdmin, upsertSessionUser } from "./auth";
 import { frames, matches, users, type Frame, type Match, type User } from "./db/schema";
+import { MatchRoom, matchRoomConnectUrl, matchRoomNotifyUrl } from "./match-room";
+
+export { MatchRoom };
 
 type Bindings = {
   DB: D1Database;
   ADMIN_PASSWORD: string;
+  MATCH_ROOM: DurableObjectNamespace;
 };
 
 type AppContext = Context<{ Bindings: Bindings }>;
@@ -400,6 +404,33 @@ async function respondWithCurrentState(c: AppContext, user: User) {
   const context = await loadCurrentMatchContext(c, currentUser);
   const matchState = context ? await loadMatchState(c, context.match.id, currentUser.id) : null;
   return c.json({ user: serializeUser(currentUser), match: matchState });
+}
+
+function getMatchRoomStub(c: AppContext, matchId: string) {
+  const id = c.env.MATCH_ROOM.idFromName(matchId);
+  return c.env.MATCH_ROOM.get(id);
+}
+
+function notifyMatchRoom(c: AppContext, matchId: string) {
+  const stub = getMatchRoomStub(c, matchId);
+  const task = stub.fetch(matchRoomNotifyUrl(), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ event: "match-updated" }),
+  });
+
+  let executionCtx: ExecutionContext | null = null;
+  try {
+    executionCtx = c.executionCtx ?? null;
+  } catch {
+    executionCtx = null;
+  }
+
+  if (executionCtx && typeof executionCtx.waitUntil === "function") {
+    executionCtx.waitUntil(task.then(() => undefined).catch(() => undefined));
+  } else {
+    void task.catch(() => undefined);
+  }
 }
 
 function renderHomePage() {
@@ -1007,6 +1038,8 @@ function renderHomePage() {
           })
         );
         const nameInput = nameField.querySelector("input");
+        nameInput.name = "player-name";
+        nameInput.autocomplete = "nickname";
 
         const createButton = make("button", { className: "primary", text: "开启新比赛" });
         createButton.addEventListener("click", () => {
@@ -1027,6 +1060,10 @@ function renderHomePage() {
           })
         );
         const codeInput = codeField.querySelector("input");
+        codeInput.name = "match-code";
+        codeInput.autocomplete = "one-time-code";
+        codeInput.setAttribute("autocapitalize", "off");
+        codeInput.spellcheck = false;
         const joinButton = make("button", { className: "secondary", text: "加入比赛" });
         joinButton.addEventListener("click", () => {
           runAction("正在加入比赛…", () => api("/api/matches/join", {
@@ -1041,6 +1078,17 @@ function renderHomePage() {
           make("h2", { text: "Admin 登录" }),
           make("p", { text: "如需管理功能，可在此登录。" })
         );
+        const adminAutofillAnchor = make("input", { value: "admin" });
+        adminAutofillAnchor.name = "username";
+        adminAutofillAnchor.autocomplete = "username";
+        adminAutofillAnchor.tabIndex = -1;
+        adminAutofillAnchor.readOnly = true;
+        adminAutofillAnchor.setAttribute("aria-hidden", "true");
+        adminAutofillAnchor.style.position = "absolute";
+        adminAutofillAnchor.style.inlineSize = "1px";
+        adminAutofillAnchor.style.blockSize = "1px";
+        adminAutofillAnchor.style.opacity = "0";
+        adminAutofillAnchor.style.pointerEvents = "none";
         const adminPasswordField = make("label", { className: "field" });
         adminPasswordField.append(
           make("span", { text: "管理员密码" }),
@@ -1050,6 +1098,8 @@ function renderHomePage() {
           })
         );
         const adminPasswordInput = adminPasswordField.querySelector("input");
+        adminPasswordInput.name = "admin-password";
+        adminPasswordInput.autocomplete = "current-password";
         const adminLoginButton = make("button", { className: "ghost", text: "Admin 登录" });
         adminLoginButton.addEventListener("click", () => {
           runAction("正在登录管理员…", () => api("/api/admin/session", {
@@ -1057,7 +1107,7 @@ function renderHomePage() {
             body: JSON.stringify({ password: adminPasswordInput.value })
           }));
         });
-        adminCard.append(adminPasswordField, adminLoginButton);
+        adminCard.append(adminAutofillAnchor, adminPasswordField, adminLoginButton);
 
         container.append(intro, nameField, createButton, joinCard, adminCard);
         shell.append(container);
@@ -1201,6 +1251,7 @@ function renderHomePage() {
         } else {
           renderLobby();
         }
+        syncRealtime();
       }
 
       async function loadSession() {
@@ -1213,6 +1264,105 @@ function renderHomePage() {
         }
 
         setStatus(state.user && state.user.isAdmin ? "已登录管理员账号。" : "准备开始新的比赛。");
+      }
+
+      const realtime = {
+        socket: null,
+        retryDelay: 1000,
+        wantOpen: false,
+        matchCode: null,
+        reconnectTimer: null,
+      };
+
+      async function refreshFromRealtime() {
+        try {
+          const payload = await api("/api/session");
+          applyPayload(payload);
+          render();
+          setStatus(readyStatus());
+        } catch (error) {
+          setStatus(error instanceof Error ? error.message : "同步失败");
+        }
+      }
+
+      function closeRealtime() {
+        realtime.wantOpen = false;
+        realtime.matchCode = null;
+        if (realtime.reconnectTimer != null) {
+          window.clearTimeout(realtime.reconnectTimer);
+          realtime.reconnectTimer = null;
+        }
+        if (realtime.socket) {
+          try { realtime.socket.close(1000, "leaving"); } catch (_e) {}
+          realtime.socket = null;
+        }
+      }
+
+      function scheduleReconnect() {
+        if (!realtime.wantOpen || realtime.reconnectTimer != null) return;
+        const delay = realtime.retryDelay;
+        realtime.reconnectTimer = window.setTimeout(() => {
+          realtime.reconnectTimer = null;
+          openRealtime();
+        }, delay);
+        realtime.retryDelay = Math.min(delay * 2, 15000);
+      }
+
+      function openRealtime() {
+        if (!realtime.wantOpen) return;
+        if (realtime.socket && (realtime.socket.readyState === 0 || realtime.socket.readyState === 1)) return;
+
+        const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+        const url = protocol + "//" + window.location.host + "/api/matches/current/socket";
+        let socket;
+        try {
+          socket = new WebSocket(url);
+        } catch (_e) {
+          scheduleReconnect();
+          return;
+        }
+        realtime.socket = socket;
+
+        socket.addEventListener("open", () => {
+          realtime.retryDelay = 1000;
+        });
+
+        socket.addEventListener("message", (event) => {
+          let payload = null;
+          try { payload = JSON.parse(event.data); } catch (_e) { return; }
+          if (payload && payload.type === "match-updated") {
+            void refreshFromRealtime();
+          }
+        });
+
+        socket.addEventListener("close", () => {
+          realtime.socket = null;
+          if (realtime.wantOpen) scheduleReconnect();
+        });
+
+        socket.addEventListener("error", () => {
+          try { socket.close(); } catch (_e) {}
+        });
+      }
+
+      function syncRealtime() {
+        const matchCode = state.match ? state.match.code : null;
+        const isAdmin = state.user && state.user.isAdmin;
+
+        if (!matchCode || isAdmin) {
+          closeRealtime();
+          return;
+        }
+
+        if (realtime.matchCode !== matchCode) {
+          closeRealtime();
+          realtime.matchCode = matchCode;
+        }
+
+        realtime.wantOpen = true;
+        if (!realtime.socket) {
+          openRealtime();
+        }
       }
 
       loadSession().catch((error) => {
@@ -1404,6 +1554,7 @@ app.post("/api/matches/join", async (c) => {
     .where(eq(users.id, user.id));
 
   const matchState = await loadMatchState(c, match.id, user.id);
+  notifyMatchRoom(c, match.id);
   return c.json({ user: serializeUser({ ...user, name, currentMatchId: match.id, updatedAt: now }), match: matchState });
 });
 
@@ -1438,6 +1589,7 @@ app.post("/api/matches/current/target-wins", async (c) => {
     })
     .where(eq(matches.id, current.context!.match.id));
 
+  notifyMatchRoom(c, current.context!.match.id);
   return respondWithCurrentState(c, current.user!);
 });
 
@@ -1492,6 +1644,7 @@ app.post("/api/matches/current/frames/:frameNumber/winner", async (c) => {
     })
     .where(eq(matches.id, current.context!.match.id));
 
+  notifyMatchRoom(c, current.context!.match.id);
   return respondWithCurrentState(c, current.user!);
 });
 
@@ -1553,6 +1706,7 @@ app.post("/api/matches/current/frames/:frameNumber/fouls", async (c) => {
     })
     .where(eq(matches.id, current.context!.match.id));
 
+  notifyMatchRoom(c, current.context!.match.id);
   return respondWithCurrentState(c, current.user!);
 });
 
@@ -1584,6 +1738,7 @@ app.post("/api/matches/current/reset", async (c) => {
     })
     .where(eq(matches.id, current.context!.match.id));
 
+  notifyMatchRoom(c, current.context!.match.id);
   return respondWithCurrentState(c, current.user!);
 });
 
@@ -1616,6 +1771,8 @@ app.post("/api/matches/current/leave", async (c) => {
     await db.delete(matches).where(eq(matches.id, updatedMatch.id));
   }
 
+  notifyMatchRoom(c, current.context!.match.id);
+
   return c.json({
     user: serializeUser({ ...current.user!, currentMatchId: null, updatedAt: now }),
     match: null,
@@ -1625,6 +1782,33 @@ app.post("/api/matches/current/leave", async (c) => {
 app.delete("/api/session", async (c) => {
   await clearSession(c);
   return c.json({ ok: true });
+});
+
+app.get("/api/matches/current/socket", async (c) => {
+  if (c.req.header("upgrade") !== "websocket") {
+    return c.text("expected websocket", 426);
+  }
+
+  const user = await getAuthenticatedUser(c);
+
+  if (!user) {
+    return c.json({ error: "需要先填写名字并进入比赛" }, 401);
+  }
+
+  if (isAdminUser(user)) {
+    return adminMatchBlockedResponse(c);
+  }
+
+  const context = await loadCurrentMatchContext(c, user);
+
+  if (!context) {
+    return c.json({ error: "当前没有进行中的比赛" }, 404);
+  }
+
+  const stub = getMatchRoomStub(c, context.match.id);
+  return stub.fetch(matchRoomConnectUrl(user.id, context.match.id), {
+    headers: { Upgrade: "websocket" },
+  });
 });
 
 export default app;

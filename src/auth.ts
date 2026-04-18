@@ -7,6 +7,7 @@ import { sessions, users, type User } from "./db/schema";
 type Bindings = {
   DB: D1Database;
   ADMIN_PASSWORD: string;
+  MATCH_ROOM: DurableObjectNamespace;
 };
 
 type AppContext = Context<{ Bindings: Bindings }>;

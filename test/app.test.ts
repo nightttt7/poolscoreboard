@@ -2,6 +2,7 @@ declare module "cloudflare:test" {
   interface ProvidedEnv {
     DB: D1Database;
     ADMIN_PASSWORD: string;
+    MATCH_ROOM: DurableObjectNamespace;
   }
 }
 
@@ -441,5 +442,103 @@ describe("pool scoreboard app", () => {
       env,
     );
     expect(missingJoinRes.status).toBe(404);
+  });
+
+  it("rejects WebSocket upgrades without a session", async () => {
+    const res = await app.request(
+      "http://localhost/api/matches/current/socket",
+      { headers: { upgrade: "websocket" } },
+      env,
+    );
+    expect(res.status).toBe(401);
+  });
+
+  it("rejects WebSocket upgrades when the user has no current match", async () => {
+    const createRes = await app.request(
+      "http://localhost/api/matches",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "Solo" }),
+      },
+      env,
+    );
+    const cookie = cookieFrom(createRes)!;
+
+    const leaveRes = await app.request(
+      "http://localhost/api/matches/current/leave",
+      { method: "POST", headers: { cookie } },
+      env,
+    );
+    expect(leaveRes.status).toBe(200);
+
+    const res = await app.request(
+      "http://localhost/api/matches/current/socket",
+      { headers: { upgrade: "websocket", cookie } },
+      env,
+    );
+    expect(res.status).toBe(404);
+  });
+
+  it("notifies room subscribers when a match mutation succeeds", async () => {
+    const createRes = await app.request(
+      "http://localhost/api/matches",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "Alice" }),
+      },
+      env,
+    );
+    const createBody = (await createRes.json()) as { match: { code: string } };
+    const aliceCookie = cookieFrom(createRes)!;
+
+    const joinRes = await app.request(
+      "http://localhost/api/matches/join",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "Bob", code: createBody.match.code }),
+      },
+      env,
+    );
+    const bobCookie = cookieFrom(joinRes)!;
+
+    const wsRes = await app.request(
+      "http://localhost/api/matches/current/socket",
+      { headers: { upgrade: "websocket", cookie: aliceCookie } },
+      env,
+    );
+    expect(wsRes.status).toBe(101);
+    const socket = wsRes.webSocket;
+    expect(socket).toBeTruthy();
+
+    const messages: string[] = [];
+    const received = new Promise<string>((resolve) => {
+      socket!.addEventListener("message", (event) => {
+        const data = typeof event.data === "string" ? event.data : "";
+        messages.push(data);
+        resolve(data);
+      });
+    });
+
+    socket!.accept();
+
+    const winRes = await app.request(
+      "http://localhost/api/matches/current/frames/1/winner",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: bobCookie },
+        body: JSON.stringify({ slot: 2 }),
+      },
+      env,
+    );
+    expect(winRes.status).toBe(200);
+
+    const data = await received;
+    expect(JSON.parse(data)).toMatchObject({ type: "match-updated" });
+    expect(messages.length).toBeGreaterThan(0);
+
+    socket!.close(1000, "done");
   });
 });
