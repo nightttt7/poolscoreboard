@@ -1683,12 +1683,6 @@ ${isAdminPage ? `
         shell.replaceChildren();
         const container = make("div", { className: "lobby-grid" });
 
-        const intro = make("div", { className: "stack" });
-        intro.append(
-          make("h2", { text: translate("lobbyCreateTitle") }),
-          make("p", { text: translate("lobbyCreateHint") })
-        );
-
         const nameField = make("label", { className: "field" });
         nameField.append(
           make("span", { text: translate("yourName") }),
@@ -1708,6 +1702,13 @@ ${isAdminPage ? `
             body: JSON.stringify({ name: nameInput.value })
           }));
         });
+
+        const createCard = make("div", { className: "frame-card" });
+        createCard.append(
+          make("h2", { text: translate("lobbyCreateTitle") }),
+          make("p", { text: translate("lobbyCreateHint") }),
+          createButton
+        );
 
         const joinCard = make("div", { className: "frame-card" });
         joinCard.append(make("h2", { text: translate("joinTitle") }));
@@ -1733,7 +1734,7 @@ ${isAdminPage ? `
         });
         joinCard.append(codeField, joinButton);
 
-        container.append(intro, nameField, createButton, joinCard);
+        container.append(nameField, createCard, joinCard);
         shell.append(container);
       }
 
