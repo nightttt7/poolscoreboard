@@ -71,6 +71,80 @@ describe("pool scoreboard app", () => {
     expect(html).toContain("返回首页");
   });
 
+  it("renders English when the browser prefers English", async () => {
+    const res = await app.request(
+      "http://localhost/",
+      {
+        headers: { "accept-language": "en-US,en;q=0.9" },
+      },
+      env,
+    );
+
+    expect(res.status).toBe(200);
+
+    const html = await res.text();
+    expect(html).toContain("Pool Scoreboard");
+    expect(html).toContain("Start a New Match");
+    expect(html).toContain("Enter the match code");
+    expect(html).toContain('data-locale="en-US"');
+    expect(html).toContain('data-locale="zh-CN"');
+    expect(html).not.toContain("开启新比赛");
+  });
+
+  it("prefers the locale cookie over the browser language", async () => {
+    const res = await app.request(
+      "http://localhost/",
+      {
+        headers: {
+          cookie: "locale=zh-CN",
+          "accept-language": "en-US,en;q=0.9",
+        },
+      },
+      env,
+    );
+
+    expect(res.status).toBe(200);
+
+    const html = await res.text();
+    expect(html).toContain("台球计分板");
+    expect(html).toContain("开启新比赛");
+    expect(html).not.toContain("Pool Scoreboard");
+  });
+
+  it("stores the selected locale in a cookie and localizes API errors", async () => {
+    const localeRes = await app.request(
+      "http://localhost/api/locale",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ locale: "en-US" }),
+      },
+      env,
+    );
+
+    expect(localeRes.status).toBe(200);
+    expect(localeRes.headers.get("set-cookie")).toContain("locale=en-US");
+
+    const localeCookie = cookieFrom(localeRes);
+    expect(localeCookie).toBe("locale=en-US");
+
+    const adminRes = await app.request(
+      "http://localhost/api/admin/session",
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          cookie: localeCookie!,
+        },
+        body: JSON.stringify({}),
+      },
+      env,
+    );
+
+    expect(adminRes.status).toBe(400);
+    await expect(adminRes.json()).resolves.toEqual({ error: "Admin password is required" });
+  });
+
   it("requires a cookie-backed session before mutating match data", async () => {
     const res = await app.request(
       "http://localhost/api/matches/current/target-wins",

@@ -2,6 +2,8 @@ import { and, asc, eq, inArray, isNull, lt, or } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import type { Context } from "hono";
 import { Hono } from "hono";
+import { getCookie, setCookie } from "hono/cookie";
+import { createI18n } from "hono-i18n";
 
 import { clearSession, getAuthenticatedUser, isAdminUser, loginAdmin, upsertSessionUser } from "./auth";
 import { frames, matches, users, type Frame, type Match, type User } from "./db/schema";
@@ -40,8 +42,255 @@ type MatchState = {
   winnerMessage: string | null;
 };
 
-const app = new Hono<{ Bindings: Bindings }>();
+const LOCALE_COOKIE_NAME = "locale";
+const LOCALE_COOKIE_MAX_AGE = 60 * 60 * 24 * 365;
+const DEFAULT_LOCALE = "zh-CN";
 const PROJECT_NAME = "poolscoreboard";
+
+const messages = {
+  "zh-CN": {
+    htmlLang: "zh-CN",
+    appName: PROJECT_NAME,
+    adminTitle: `${PROJECT_NAME} Admin`,
+    heroBadgeLobby: "台球计分板",
+    heroBadgeAdmin: "Admin 入口 · 固定账号",
+    heroDescriptionAdmin: "使用固定 admin 账号进入独立管理页面。",
+    statusConnecting: "正在连接…",
+    statusMatchSynced: "已同步比赛状态。",
+    statusAdminLoggedIn: "已登录管理员账号。",
+    statusAdminLoginPrompt: "请登录管理员账号。",
+    statusLobbyReady: "准备开始新的比赛。",
+    statusAdminUsePortal: "管理员账号请使用独立 Admin 页面。",
+    statusMatchRestored: "已恢复进行中的比赛。",
+    statusSyncFailed: "同步失败",
+    statusConnectionFailed: "连接失败",
+    statusUnknownError: "发生未知错误",
+    errorRequestFailed: "请求失败",
+    footerNote: PROJECT_NAME,
+    languageLabel: "语言",
+    languageNativeZh: "中文",
+    languageNativeEn: "English",
+    localeChanged: "已切换为中文。",
+    pageReloading: "正在刷新页面…",
+    languageSwitchError: "语言切换失败",
+    errorLocaleInvalid: "语言选项不正确",
+    adminLoginTitle: "Admin 登录",
+    adminLoginHint: "独立管理员入口不会干扰首页的玩家输入。",
+    adminPasswordLabel: "管理员密码",
+    adminPasswordPlaceholder: "管理员密码",
+    backHome: "返回首页",
+    adminLoginButton: "Admin 登录",
+    adminLoginPending: "正在登录管理员…",
+    adminHomeTitle: "Admin 已登录",
+    adminHomeHint: "管理员功能尚在开发中。",
+    adminLogoutButton: "退出 Admin",
+    adminLogoutPending: "正在退出管理员…",
+    lobbyCreateTitle: "开始一场新比赛",
+    lobbyCreateHint: "创建后把比赛编号告知另一位玩家即可。",
+    yourName: "你的名字",
+    namePlaceholder: "例如：小王",
+    createMatchButton: "开启新比赛",
+    createMatchPending: "正在创建比赛…",
+    joinTitle: "加入已有比赛",
+    matchCodeLabel: "比赛编号",
+    matchCodePlaceholder: "输入比赛编号",
+    joinMatchButton: "加入比赛",
+    joinMatchPending: "正在加入比赛…",
+    adminPortalTitle: "Admin 入口",
+    adminPortalHint: "当前已登录管理员账号，请在独立页面继续管理。",
+    openAdminPage: "进入 Admin 页面",
+    currentMatchTitle: "当前比赛",
+    targetWinsSummary: "先胜 {count} 局",
+    emptySeat: "空位 {slot}",
+    selfTag: "你",
+    totalScoreReadonly: "总比分（只读）",
+    emptySeatHint: "当前有空位，把比赛编号告诉另一位玩家即可继续。",
+    targetWinsCardTitle: "胜利所需局数",
+    updateTargetWinsPending: "正在更新目标局数…",
+    frameTitle: "第 {frameNumber} 局",
+    clearWinner: "清空胜负",
+    defaultPlayer: "玩家{slot}",
+    winButton: "{name} · win",
+    foulLabel: "{name} 犯规",
+    leaveMatchButton: "退出当前比赛",
+    leaveMatchConfirm: "确定退出当前比赛吗？",
+    leaveMatchPending: "正在退出比赛…",
+    resetMatchButton: "重置当前比赛",
+    resetMatchConfirm: "确定重置当前比赛吗？比分和犯规都会清空。",
+    resetMatchPending: "正在重置比赛…",
+    websocketExpected: "expected websocket",
+    errorNeedNameAndMatch: "需要先填写名字并进入比赛",
+    errorNoCurrentMatch: "当前没有进行中的比赛",
+    errorAdminBlocked: "管理员账号不能参与比赛",
+    errorNeedExitBeforeAdminLogin: "请先退出当前比赛后再使用管理员登录",
+    errorAdminPasswordRequired: "管理员密码必填",
+    errorAdminPasswordInvalid: "管理员密码错误",
+    errorNameRequired: "名字必填，且不能超过 {max} 个字符",
+    errorMatchCodeInvalid: "比赛编号格式不正确",
+    errorAlreadyInOtherMatch: "你已经在另一场比赛里了，请先退出当前比赛",
+    errorMatchCodeNotFound: "没有找到这个比赛编号",
+    errorMatchFull: "这场比赛已经满员了",
+    errorTargetWinsInteger: "目标局数必须是整数",
+    errorFrameInvalid: "局数不正确",
+    errorWinnerSlotInvalid: "胜利方必须是 1、2 或空值",
+    errorFrameNotFound: "没有找到这一局",
+    errorFoulSlotInvalid: "犯规方必须是 1 或 2",
+    errorFoulValueInteger: "犯规次数必须是整数",
+    winnerMessage: "{winner}赢得了本场比赛，比分为 {player1} {score1} : {player2} {score2}",
+  },
+  "en-US": {
+    htmlLang: "en-US",
+    appName: PROJECT_NAME,
+    adminTitle: `${PROJECT_NAME} Admin`,
+    heroBadgeLobby: "Pool Scoreboard",
+    heroBadgeAdmin: "Admin Portal · Fixed Account",
+    heroDescriptionAdmin: "Use the fixed admin account on the dedicated admin page.",
+    statusConnecting: "Connecting…",
+    statusMatchSynced: "Match state is in sync.",
+    statusAdminLoggedIn: "Admin is signed in.",
+    statusAdminLoginPrompt: "Sign in as admin.",
+    statusLobbyReady: "Ready to start a new match.",
+    statusAdminUsePortal: "Admin accounts should use the dedicated admin page.",
+    statusMatchRestored: "Restored the active match.",
+    statusSyncFailed: "Sync failed",
+    statusConnectionFailed: "Connection failed",
+    statusUnknownError: "An unexpected error occurred",
+    errorRequestFailed: "Request failed",
+    footerNote: PROJECT_NAME,
+    languageLabel: "Language",
+    languageNativeZh: "中文",
+    languageNativeEn: "English",
+    localeChanged: "Switched to English.",
+    pageReloading: "Reloading…",
+    languageSwitchError: "Failed to switch language",
+    errorLocaleInvalid: "Invalid locale selection",
+    adminLoginTitle: "Admin Sign In",
+    adminLoginHint: "The dedicated admin entry does not interfere with player inputs on the homepage.",
+    adminPasswordLabel: "Admin password",
+    adminPasswordPlaceholder: "Admin password",
+    backHome: "Back Home",
+    adminLoginButton: "Admin Sign In",
+    adminLoginPending: "Signing in as admin…",
+    adminHomeTitle: "Admin Signed In",
+    adminHomeHint: "Admin features are still under development.",
+    adminLogoutButton: "Sign Out Admin",
+    adminLogoutPending: "Signing out admin…",
+    lobbyCreateTitle: "Start a New Match",
+    lobbyCreateHint: "Create a match and share the code with the other player.",
+    yourName: "Your name",
+    namePlaceholder: "Example: Alex",
+    createMatchButton: "Create Match",
+    createMatchPending: "Creating match…",
+    joinTitle: "Join an Existing Match",
+    matchCodeLabel: "Match code",
+    matchCodePlaceholder: "Enter the match code",
+    joinMatchButton: "Join Match",
+    joinMatchPending: "Joining match…",
+    adminPortalTitle: "Admin Portal",
+    adminPortalHint: "Admin is already signed in. Continue on the dedicated admin page.",
+    openAdminPage: "Open Admin Page",
+    currentMatchTitle: "Current Match",
+    targetWinsSummary: "Race to {count}",
+    emptySeat: "Open seat {slot}",
+    selfTag: "You",
+    totalScoreReadonly: "Total score (read-only)",
+    emptySeatHint: "There is still an open seat. Share the match code with the other player to continue.",
+    targetWinsCardTitle: "Frames Needed to Win",
+    updateTargetWinsPending: "Updating target frames…",
+    frameTitle: "Frame {frameNumber}",
+    clearWinner: "Clear Winner",
+    defaultPlayer: "Player {slot}",
+    winButton: "{name} · win",
+    foulLabel: "{name} fouls",
+    leaveMatchButton: "Leave Current Match",
+    leaveMatchConfirm: "Leave the current match?",
+    leaveMatchPending: "Leaving match…",
+    resetMatchButton: "Reset Current Match",
+    resetMatchConfirm: "Reset the current match? Scores and fouls will be cleared.",
+    resetMatchPending: "Resetting match…",
+    websocketExpected: "expected websocket",
+    errorNeedNameAndMatch: "Enter your name and join a match first",
+    errorNoCurrentMatch: "There is no active match",
+    errorAdminBlocked: "Admin accounts cannot join matches",
+    errorNeedExitBeforeAdminLogin: "Leave the current match before signing in as admin",
+    errorAdminPasswordRequired: "Admin password is required",
+    errorAdminPasswordInvalid: "Admin password is incorrect",
+    errorNameRequired: "Name is required and must be no longer than {max} characters",
+    errorMatchCodeInvalid: "Match code format is invalid",
+    errorAlreadyInOtherMatch: "You are already in another match. Leave it first",
+    errorMatchCodeNotFound: "No match was found for that code",
+    errorMatchFull: "This match is already full",
+    errorTargetWinsInteger: "Target frames must be an integer",
+    errorFrameInvalid: "Invalid frame number",
+    errorWinnerSlotInvalid: "Winner slot must be 1, 2, or null",
+    errorFrameNotFound: "Frame not found",
+    errorFoulSlotInvalid: "Foul slot must be 1 or 2",
+    errorFoulValueInteger: "Foul count must be an integer",
+    winnerMessage: "{winner} wins the match: {player1} {score1} : {player2} {score2}",
+  },
+} as const;
+
+type Locale = keyof typeof messages;
+type MessageKey = keyof typeof messages["zh-CN"];
+type MessageDictionary = Record<MessageKey, string>;
+
+const SUPPORTED_LOCALES = Object.keys(messages) as Locale[];
+
+function normalizeLocale(value: string | null | undefined) {
+  if (!value) {
+    return null;
+  }
+
+  const normalized = value.trim().toLowerCase();
+
+  if (!normalized) {
+    return null;
+  }
+
+  if (normalized.startsWith("zh")) {
+    return "zh-CN" as const;
+  }
+
+  if (normalized.startsWith("en")) {
+    return "en-US" as const;
+  }
+
+  return null;
+}
+
+function resolveLocale(c: AppContext) {
+  const cookieLocale = normalizeLocale(getCookie(c, LOCALE_COOKIE_NAME));
+
+  if (cookieLocale) {
+    return cookieLocale;
+  }
+
+  const acceptLanguage = c.req.header("accept-language");
+
+  if (acceptLanguage) {
+    for (const segment of acceptLanguage.split(",")) {
+      const candidate = normalizeLocale(segment.split(";")[0]);
+
+      if (candidate) {
+        return candidate;
+      }
+    }
+  }
+
+  return DEFAULT_LOCALE;
+}
+
+const { i18nMiddleware, getI18n } = createI18n<AppContext, typeof messages, Locale>({
+  messages,
+  defaultLocale: DEFAULT_LOCALE,
+  getLocale: (c) => resolveLocale(c),
+});
+
+const app = new Hono<{ Bindings: Bindings }>();
+app.use(i18nMiddleware);
+
+type Translate = ReturnType<typeof getI18n>;
+
 const DEFAULT_TARGET_WINS = 7;
 const MAX_NAME_LENGTH = 24;
 const MAX_TARGET_WINS = 99;
@@ -50,6 +299,16 @@ const MATCH_IDLE_TTL_MS = 1000 * 60 * 60 * 6;
 
 function getDatabase(c: AppContext) {
   return drizzle(c.env.DB);
+}
+
+function setLocaleCookie(c: AppContext, locale: Locale) {
+  setCookie(c, LOCALE_COOKIE_NAME, locale, {
+    httpOnly: false,
+    sameSite: "Lax",
+    secure: new URL(c.req.url).protocol === "https:",
+    path: "/",
+    maxAge: LOCALE_COOKIE_MAX_AGE,
+  });
 }
 
 function normalizeName(value: unknown) {
@@ -91,9 +350,9 @@ function clamp(value: number, minimum: number, maximum: number) {
   return Math.min(maximum, Math.max(minimum, value));
 }
 
-function playerName(match: Match, slot: 1 | 2) {
+function playerName(t: Translate, match: Match, slot: 1 | 2) {
   const name = slot === 1 ? match.player1Name : match.player2Name;
-  return name || `玩家${slot}`;
+  return name || t("defaultPlayer", { slot: String(slot) });
 }
 
 function isFrameEmpty(frame: Frame) {
@@ -236,6 +495,7 @@ async function normalizeFrames(c: AppContext, match: Match) {
 
 async function loadMatchState(c: AppContext, matchId: string, currentUserId: number | null) {
   const db = getDatabase(c);
+  const t = getI18n(c);
   const match = await db.select().from(matches).where(eq(matches.id, matchId)).get();
 
   if (!match) {
@@ -247,7 +507,13 @@ async function loadMatchState(c: AppContext, matchId: string, currentUserId: num
   const totalWins = calculateTotalWins(frameRows);
   const winnerSlot = determineWinnerSlot(match, frameRows);
   const winnerMessage = winnerSlot
-    ? `${playerName(match, winnerSlot)}赢得了本场比赛，比分为 ${playerName(match, 1)} ${totalWins[1]} : ${playerName(match, 2)} ${totalWins[2]}`
+    ? t("winnerMessage", {
+      winner: playerName(t, match, winnerSlot),
+      player1: playerName(t, match, 1),
+      score1: String(totalWins[1]),
+      player2: playerName(t, match, 2),
+      score2: String(totalWins[2]),
+    })
     : null;
 
   return {
@@ -318,13 +584,14 @@ async function loadCurrentMatchContext(c: AppContext, user: User) {
 
 async function ensureCurrentMatch(c: AppContext) {
   await cleanupStaleMatches(c);
+  const t = getI18n(c);
   const user = await getAuthenticatedUser(c);
 
   if (!user) {
     return {
       user: null,
       context: null,
-      response: c.json({ error: "需要先填写名字并进入比赛" }, 401),
+      response: c.json({ error: t("errorNeedNameAndMatch") }, 401),
     };
   }
 
@@ -342,7 +609,7 @@ async function ensureCurrentMatch(c: AppContext) {
     return {
       user,
       context: null,
-      response: c.json({ error: "当前没有进行中的比赛" }, 404),
+      response: c.json({ error: t("errorNoCurrentMatch") }, 404),
     };
   }
 
@@ -395,7 +662,7 @@ function serializeUser(user: User | null) {
 }
 
 function adminMatchBlockedResponse(c: AppContext) {
-  return c.json({ error: "管理员账号不能参与比赛" }, 403);
+  return c.json({ error: getI18n(c)("errorAdminBlocked") }, 403);
 }
 
 async function respondWithCurrentState(c: AppContext, user: User) {
@@ -433,16 +700,92 @@ function notifyMatchRoom(c: AppContext, matchId: string) {
   }
 }
 
-function renderHomePage(pageMode: "lobby" | "admin" = "lobby") {
+function renderHomePage(c: AppContext, pageMode: "lobby" | "admin" = "lobby") {
   const isAdminPage = pageMode === "admin";
-  const pageTitle = isAdminPage ? `${PROJECT_NAME} Admin` : PROJECT_NAME;
-  const heroBadge = isAdminPage ? "Admin 入口 · 固定账号" : "台球计分板";
-  const heroDescription = isAdminPage
-    ? "使用固定 admin 账号进入独立管理页面。"
-    : null;
+  const locale = resolveLocale(c);
+  const currentMessages = messages[locale] as MessageDictionary;
+  const t = getI18n(c);
+  const clientTranslationKeys: MessageKey[] = isAdminPage
+    ? [
+      "statusMatchSynced",
+      "statusAdminLoggedIn",
+      "statusAdminLoginPrompt",
+      "statusUnknownError",
+      "errorRequestFailed",
+      "pageReloading",
+      "languageSwitchError",
+      "adminLoginTitle",
+      "adminLoginHint",
+      "adminPasswordLabel",
+      "adminPasswordPlaceholder",
+      "backHome",
+      "adminLoginButton",
+      "adminLoginPending",
+      "adminHomeTitle",
+      "adminHomeHint",
+      "adminLogoutButton",
+      "adminLogoutPending",
+      "statusMatchRestored",
+      "statusSyncFailed",
+      "statusConnectionFailed",
+    ]
+    : [
+      "statusMatchSynced",
+      "statusAdminLoggedIn",
+      "statusAdminUsePortal",
+      "statusLobbyReady",
+      "statusUnknownError",
+      "errorRequestFailed",
+      "pageReloading",
+      "languageSwitchError",
+      "defaultPlayer",
+      "emptySeat",
+      "lobbyCreateTitle",
+      "lobbyCreateHint",
+      "yourName",
+      "namePlaceholder",
+      "createMatchButton",
+      "createMatchPending",
+      "joinTitle",
+      "matchCodeLabel",
+      "matchCodePlaceholder",
+      "joinMatchButton",
+      "joinMatchPending",
+      "adminPortalTitle",
+      "adminPortalHint",
+      "openAdminPage",
+      "adminLogoutButton",
+      "adminLogoutPending",
+      "currentMatchTitle",
+      "targetWinsSummary",
+      "selfTag",
+      "totalScoreReadonly",
+      "emptySeatHint",
+      "targetWinsCardTitle",
+      "updateTargetWinsPending",
+      "frameTitle",
+      "clearWinner",
+      "winButton",
+      "foulLabel",
+      "leaveMatchButton",
+      "leaveMatchConfirm",
+      "leaveMatchPending",
+      "resetMatchButton",
+      "resetMatchConfirm",
+      "resetMatchPending",
+      "statusMatchRestored",
+      "statusSyncFailed",
+      "statusConnectionFailed",
+    ];
+  const clientTranslations = Object.fromEntries(
+    clientTranslationKeys.map((key) => [key, currentMessages[key]]),
+  );
+  const pageTitle = isAdminPage ? t("adminTitle") : t("appName");
+  const heroBadge = isAdminPage ? t("heroBadgeAdmin") : t("heroBadgeLobby");
+  const heroDescription = isAdminPage ? t("heroDescriptionAdmin") : null;
 
   return `<!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="${currentMessages.htmlLang}">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -491,6 +834,13 @@ function renderHomePage(pageMode: "lobby" | "admin" = "lobby") {
       h2 { font-size: 1.05rem; margin-bottom: 12px; }
       p, label, .muted, .hint { color: var(--muted); }
       .hero { display: grid; gap: 8px; }
+      .hero-top {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
       .badge {
         display: inline-flex;
         width: fit-content;
@@ -501,6 +851,29 @@ function renderHomePage(pageMode: "lobby" | "admin" = "lobby") {
         background: rgba(59, 130, 246, 0.16);
         color: #bfdbfe;
         font-size: 0.82rem;
+      }
+      .locale-switch {
+        display: inline-flex;
+        gap: 8px;
+        align-items: center;
+        padding: 6px;
+        border-radius: 999px;
+        background: rgba(15, 23, 42, 0.56);
+        border: 1px solid var(--line);
+      }
+      .locale-button {
+        border: 1px solid transparent;
+        border-radius: 999px;
+        background: transparent;
+        color: var(--muted);
+        padding: 8px 12px;
+        font-size: 0.85rem;
+        font-weight: 700;
+      }
+      .locale-button.active {
+        background: var(--accent-soft);
+        border-color: rgba(34, 197, 94, 0.24);
+        color: #dcfce7;
       }
       .status {
         min-height: 24px;
@@ -656,20 +1029,35 @@ function renderHomePage(pageMode: "lobby" | "admin" = "lobby") {
   <body>
     <main class="stack">
       <section class="panel hero">
-        <span class="badge">${heroBadge}</span>
+        <div class="hero-top">
+          <span class="badge">${heroBadge}</span>
+          <div class="locale-switch" aria-label="${t("languageLabel")}">
+            ${SUPPORTED_LOCALES.map((supportedLocale) => `
+              <button
+                type="button"
+                class="locale-button${supportedLocale === locale ? " active" : ""}"
+                data-locale="${supportedLocale}"
+              >${supportedLocale === "zh-CN" ? t("languageNativeZh") : t("languageNativeEn")}</button>
+            `).join("")}
+          </div>
+        </div>
         <h1>${PROJECT_NAME}</h1>
         ${heroDescription ? `<p>${heroDescription}</p>` : ""}
       </section>
       <section class="panel">
-        <div class="status" id="status">正在连接…</div>
+        <div class="status" id="status">${t("statusConnecting")}</div>
       </section>
       <section class="panel" id="app-shell"></section>
-      <p class="footer-note">${PROJECT_NAME}</p>
+      <p class="footer-note">${t("footerNote")}</p>
     </main>
     <script>
       const pageMode = ${JSON.stringify(pageMode)};
+      const locale = ${JSON.stringify(locale)};
+      const supportedLocales = ${JSON.stringify(SUPPORTED_LOCALES)};
+      const translations = ${JSON.stringify(clientTranslations)};
       const shell = document.getElementById("app-shell");
       const statusNode = document.getElementById("status");
+      const localeButtons = Array.from(document.querySelectorAll("[data-locale]"));
       const state = {
         user: null,
         match: null,
@@ -682,16 +1070,24 @@ function renderHomePage(pageMode: "lobby" | "admin" = "lobby") {
         statusNode.textContent = message;
       }
 
+      function translate(key, params = {}) {
+        const template = translations[key] || key;
+        return String(template).replace(/\{(\w+)\}/g, (_, name) => {
+          const value = params[name];
+          return value == null ? "" : String(value);
+        });
+      }
+
       function readyStatus() {
         if (state.match) {
-          return "已同步比赛状态。";
+          return translate("statusMatchSynced");
         }
 
         if (pageMode === "admin") {
-          return state.user && state.user.isAdmin ? "已登录管理员账号。" : "请登录管理员账号。";
+          return state.user && state.user.isAdmin ? translate("statusAdminLoggedIn") : translate("statusAdminLoginPrompt");
         }
 
-        return state.user && state.user.isAdmin ? "管理员账号请使用独立 Admin 页面。" : "准备开始新的比赛。";
+        return state.user && state.user.isAdmin ? translate("statusAdminUsePortal") : translate("statusLobbyReady");
       }
 
       function resetMatchInteractionState() {
@@ -766,8 +1162,34 @@ function renderHomePage(pageMode: "lobby" | "admin" = "lobby") {
         return node;
       }
 
+      function playerLabel(player) {
+        return player.name || translate("defaultPlayer", { slot: player.slot });
+      }
+
+      function seatLabel(player) {
+        return player.name || translate("emptySeat", { slot: player.slot });
+      }
+
       function goTo(path) {
         window.location.href = path;
+      }
+
+      async function switchLocale(nextLocale) {
+        if (!supportedLocales.includes(nextLocale) || nextLocale === locale) {
+          return;
+        }
+
+        setStatus(translate("pageReloading"));
+
+        try {
+          await api("/api/locale", {
+            method: "POST",
+            body: JSON.stringify({ locale: nextLocale })
+          });
+          window.location.reload();
+        } catch (error) {
+          setStatus(error instanceof Error ? error.message : translate("languageSwitchError"));
+        }
       }
 
       function logoutSession(pendingMessage) {
@@ -793,7 +1215,7 @@ function renderHomePage(pageMode: "lobby" | "admin" = "lobby") {
         const payload = await parsePayload(response);
 
         if (!response.ok) {
-          throw new Error(payload.error || "请求失败");
+          throw new Error(payload.error || translate("errorRequestFailed"));
         }
 
         return payload;
@@ -827,7 +1249,7 @@ function renderHomePage(pageMode: "lobby" | "admin" = "lobby") {
           setStatus(readyStatus());
           return payload;
         } catch (error) {
-          setStatus(error instanceof Error ? error.message : "发生未知错误");
+          setStatus(error instanceof Error ? error.message : translate("statusUnknownError"));
           return null;
         }
       }
@@ -882,7 +1304,7 @@ function renderHomePage(pageMode: "lobby" | "admin" = "lobby") {
         render();
 
         try {
-          await runAction("正在更新目标局数…", () => api("/api/matches/current/target-wins", {
+          await runAction(translate("updateTargetWinsPending"), () => api("/api/matches/current/target-wins", {
             method: "POST",
             body: JSON.stringify({ value })
           }));
@@ -906,7 +1328,7 @@ function renderHomePage(pageMode: "lobby" | "admin" = "lobby") {
           } catch (error) {
             delete state.pendingWinners[key];
             render();
-            setStatus(error instanceof Error ? error.message : "发生未知错误");
+            setStatus(error instanceof Error ? error.message : translate("statusUnknownError"));
             return;
           }
 
@@ -981,7 +1403,7 @@ function renderHomePage(pageMode: "lobby" | "admin" = "lobby") {
           } catch (error) {
             delete state.pendingFouls[key];
             render();
-            setStatus(error instanceof Error ? error.message : "发生未知错误");
+            setStatus(error instanceof Error ? error.message : translate("statusUnknownError"));
             return;
           }
 
@@ -1042,14 +1464,23 @@ function renderHomePage(pageMode: "lobby" | "admin" = "lobby") {
         void flushFoulUpdate(frameNumber, slot, value);
       }
 
+      localeButtons.forEach((button) => {
+        button.addEventListener("click", () => {
+          const nextLocale = button.getAttribute("data-locale");
+          if (nextLocale) {
+            void switchLocale(nextLocale);
+          }
+        });
+      });
+
 ${isAdminPage ? `
       function renderAdminLogin() {
         shell.replaceChildren();
         const container = make("div", { className: "match-stack" });
         const card = make("div", { className: "frame-card" });
         card.append(
-          make("h2", { text: "Admin 登录" }),
-          make("p", { text: "独立管理员入口不会干扰首页的玩家输入。" })
+          make("h2", { text: translate("adminLoginTitle") }),
+          make("p", { text: translate("adminLoginHint") })
         );
         const adminAutofillAnchor = make("input", { value: "admin" });
         adminAutofillAnchor.name = "username";
@@ -1065,10 +1496,10 @@ ${isAdminPage ? `
 
         const adminPasswordField = make("label", { className: "field" });
         adminPasswordField.append(
-          make("span", { text: "管理员密码" }),
+          make("span", { text: translate("adminPasswordLabel") }),
           make("input", {
             type: "password",
-            placeholder: "管理员密码"
+            placeholder: translate("adminPasswordPlaceholder")
           })
         );
         const adminPasswordInput = adminPasswordField.querySelector("input");
@@ -1076,13 +1507,13 @@ ${isAdminPage ? `
         adminPasswordInput.autocomplete = "current-password";
 
         const actions = make("div", { className: "button-row" });
-        const backButton = make("button", { className: "ghost", text: "返回首页" });
+        const backButton = make("button", { className: "ghost", text: translate("backHome") });
         backButton.addEventListener("click", () => {
           goTo("/");
         });
-        const adminLoginButton = make("button", { className: "primary", text: "Admin 登录" });
+        const adminLoginButton = make("button", { className: "primary", text: translate("adminLoginButton") });
         adminLoginButton.addEventListener("click", () => {
-          runAction("正在登录管理员…", () => api("/api/admin/session", {
+          runAction(translate("adminLoginPending"), () => api("/api/admin/session", {
             method: "POST",
             body: JSON.stringify({ password: adminPasswordInput.value })
           }));
@@ -1098,17 +1529,17 @@ ${isAdminPage ? `
         const container = make("div", { className: "match-stack" });
         const card = make("div", { className: "frame-card" });
         card.append(
-          make("h2", { text: "Admin 已登录" }),
-          make("p", { text: "管理员功能尚在开发中。" })
+          make("h2", { text: translate("adminHomeTitle") }),
+          make("p", { text: translate("adminHomeHint") })
         );
         const actions = make("div", { className: "button-row" });
-        const backButton = make("button", { className: "ghost", text: "返回首页" });
+        const backButton = make("button", { className: "ghost", text: translate("backHome") });
         backButton.addEventListener("click", () => {
           goTo("/");
         });
-        const logoutButton = make("button", { className: "ghost", text: "退出 Admin" });
+        const logoutButton = make("button", { className: "ghost", text: translate("adminLogoutButton") });
         logoutButton.addEventListener("click", () => {
-          logoutSession("正在退出管理员…");
+          logoutSession(translate("adminLogoutPending"));
         });
         actions.append(backButton, logoutButton);
         card.append(actions);
@@ -1130,15 +1561,15 @@ ${isAdminPage ? `
 
         const intro = make("div", { className: "stack" });
         intro.append(
-          make("h2", { text: "开始一场新比赛" }),
-          make("p", { text: "创建后把比赛编号告知另一位玩家即可。" })
+          make("h2", { text: translate("lobbyCreateTitle") }),
+          make("p", { text: translate("lobbyCreateHint") })
         );
 
         const nameField = make("label", { className: "field" });
         nameField.append(
-          make("span", { text: "你的名字" }),
+          make("span", { text: translate("yourName") }),
           make("input", {
-            placeholder: "例如：小王",
+            placeholder: translate("namePlaceholder"),
             value: state.user ? state.user.name : ""
           })
         );
@@ -1146,21 +1577,21 @@ ${isAdminPage ? `
         nameInput.name = "player-name";
         nameInput.autocomplete = "nickname";
 
-        const createButton = make("button", { className: "primary", text: "开启新比赛" });
+        const createButton = make("button", { className: "primary", text: translate("createMatchButton") });
         createButton.addEventListener("click", () => {
-          runAction("正在创建比赛…", () => api("/api/matches", {
+          runAction(translate("createMatchPending"), () => api("/api/matches", {
             method: "POST",
             body: JSON.stringify({ name: nameInput.value })
           }));
         });
 
         const joinCard = make("div", { className: "frame-card" });
-        joinCard.append(make("h2", { text: "加入已有比赛" }));
+        joinCard.append(make("h2", { text: translate("joinTitle") }));
         const codeField = make("label", { className: "field" });
         codeField.append(
-          make("span", { text: "比赛编号" }),
+          make("span", { text: translate("matchCodeLabel") }),
           make("input", {
-            placeholder: "输入比赛编号",
+            placeholder: translate("matchCodePlaceholder"),
             inputMode: "numeric"
           })
         );
@@ -1169,9 +1600,9 @@ ${isAdminPage ? `
         codeInput.autocomplete = "one-time-code";
         codeInput.setAttribute("autocapitalize", "off");
         codeInput.spellcheck = false;
-        const joinButton = make("button", { className: "secondary", text: "加入比赛" });
+        const joinButton = make("button", { className: "secondary", text: translate("joinMatchButton") });
         joinButton.addEventListener("click", () => {
-          runAction("正在加入比赛…", () => api("/api/matches/join", {
+          runAction(translate("joinMatchPending"), () => api("/api/matches/join", {
             method: "POST",
             body: JSON.stringify({ name: nameInput.value, code: codeInput.value })
           }));
@@ -1187,17 +1618,17 @@ ${isAdminPage ? `
         const container = make("div", { className: "match-stack" });
         const card = make("div", { className: "frame-card" });
         card.append(
-          make("h2", { text: "Admin 入口" }),
-          make("p", { text: "当前已登录管理员账号，请在独立页面继续管理。" })
+          make("h2", { text: translate("adminPortalTitle") }),
+          make("p", { text: translate("adminPortalHint") })
         );
         const actions = make("div", { className: "button-row" });
-        const openButton = make("button", { className: "primary", text: "进入 Admin 页面" });
+        const openButton = make("button", { className: "primary", text: translate("openAdminPage") });
         openButton.addEventListener("click", () => {
           goTo("/admin");
         });
-        const logoutButton = make("button", { className: "ghost", text: "退出 Admin" });
+        const logoutButton = make("button", { className: "ghost", text: translate("adminLogoutButton") });
         logoutButton.addEventListener("click", () => {
-          logoutSession("正在退出管理员…");
+          logoutSession(translate("adminLogoutPending"));
         });
         actions.append(openButton, logoutButton);
         card.append(actions);
@@ -1223,10 +1654,10 @@ ${isAdminPage ? `
         const header = make("div", { className: "match-header" });
         const titleBox = make("div", { className: "stack" });
         titleBox.append(
-          make("h2", { text: "当前比赛" }),
+          make("h2", { text: translate("currentMatchTitle") }),
           make("div", { className: "code", text: match.code })
         );
-        const targetBox = make("div", { className: "muted", text: "先胜 " + match.targetWins + " 局" });
+        const targetBox = make("div", { className: "muted", text: translate("targetWinsSummary", { count: match.targetWins }) });
         header.append(titleBox, targetBox);
         container.append(header);
 
@@ -1234,11 +1665,11 @@ ${isAdminPage ? `
         match.players.forEach((player) => {
           const card = make("div", { className: "score-card" });
           const nameRow = make("div");
-          nameRow.append(make("span", { text: player.name || ("空位 " + player.slot) }));
+          nameRow.append(make("span", { text: seatLabel(player) }));
           if (player.isSelf) {
-            nameRow.append(make("span", { className: "self-tag", text: "你" }));
+            nameRow.append(make("span", { className: "self-tag", text: translate("selfTag") }));
           }
-          card.append(nameRow, make("strong", { text: String(match.totalWins[player.slot]) }), make("p", { text: "总比分（只读）" }));
+          card.append(nameRow, make("strong", { text: String(match.totalWins[player.slot]) }), make("p", { text: translate("totalScoreReadonly") }));
           scoreGrid.append(card);
         });
         container.append(scoreGrid);
@@ -1248,14 +1679,14 @@ ${isAdminPage ? `
         }
 
         if (match.players.some((player) => !player.occupied)) {
-          container.append(make("div", { className: "empty-seat", text: "当前有空位，把比赛编号告诉另一位玩家即可继续。" }));
+          container.append(make("div", { className: "empty-seat", text: translate("emptySeatHint") }));
         }
 
         const targetCard = make("div", { className: "target-card" });
         if (state.targetWinsPending) {
           targetCard.classList.add("pending");
         }
-        targetCard.append(make("h2", { text: "胜利所需局数" }));
+        targetCard.append(make("h2", { text: translate("targetWinsCardTitle") }));
         targetCard.append(createStepper(match.targetWins, (value) => {
           void commitTargetWins(value);
         }, 1, 99, { disabled: state.targetWinsPending, pending: state.targetWinsPending }));
@@ -1267,9 +1698,9 @@ ${isAdminPage ? `
           const displayedWinnerSlot = getDisplayedWinnerSlot(frame);
           const frameCard = make("div", { className: "frame-card" });
           const frameHead = make("div", { className: "frame-head" });
-          frameHead.append(make("h3", { text: "第 " + frame.number + " 局" }));
+          frameHead.append(make("h3", { text: translate("frameTitle", { frameNumber: frame.number }) }));
           if (displayedWinnerSlot != null) {
-            const clearButton = make("button", { className: "ghost clear-button", text: "清空胜负" });
+            const clearButton = make("button", { className: "ghost clear-button", text: translate("clearWinner") });
             clearButton.disabled = winnerPending;
             clearButton.addEventListener("click", () => {
               queueWinnerUpdate(frame.number, null);
@@ -1282,7 +1713,7 @@ ${isAdminPage ? `
           match.players.forEach((player) => {
             const button = make("button", {
               className: "win-button" + (displayedWinnerSlot === player.slot ? " active" : ""),
-              text: (player.name || ("玩家" + player.slot)) + " · win"
+              text: translate("winButton", { name: playerLabel(player) })
             });
             button.disabled = winnerPending;
             button.addEventListener("click", () => {
@@ -1296,7 +1727,7 @@ ${isAdminPage ? `
           match.players.forEach((player) => {
             const foulPending = Boolean(state.pendingFouls[foulKey(frame.number, player.slot)]);
             const stepperCard = make("div", { className: "stepper" + (foulPending ? " pending" : "") });
-            stepperCard.append(make("p", { text: (player.name || ("玩家" + player.slot)) + " 犯规" }));
+            stepperCard.append(make("p", { text: translate("foulLabel", { name: playerLabel(player) }) }));
             const value = getDisplayedFoulValue(frame, player.slot);
             stepperCard.append(createStepper(value, (next) => {
               queueFoulUpdate(frame.number, player.slot, next);
@@ -1309,15 +1740,15 @@ ${isAdminPage ? `
         container.append(frameList);
 
         const actions = make("div", { className: "button-row" });
-        const leaveButton = make("button", { className: "danger", text: "退出当前比赛" });
+        const leaveButton = make("button", { className: "danger", text: translate("leaveMatchButton") });
         leaveButton.addEventListener("click", () => {
-          if (!window.confirm("确定退出当前比赛吗？")) return;
-          runAction("正在退出比赛…", () => api("/api/matches/current/leave", { method: "POST" }));
+          if (!window.confirm(translate("leaveMatchConfirm"))) return;
+          runAction(translate("leaveMatchPending"), () => api("/api/matches/current/leave", { method: "POST" }));
         });
-        const resetButton = make("button", { className: "ghost", text: "重置当前比赛" });
+        const resetButton = make("button", { className: "ghost", text: translate("resetMatchButton") });
         resetButton.addEventListener("click", () => {
-          if (!window.confirm("确定重置当前比赛吗？比分和犯规都会清空。")) return;
-          runAction("正在重置比赛…", () => api("/api/matches/current/reset", { method: "POST" }));
+          if (!window.confirm(translate("resetMatchConfirm"))) return;
+          runAction(translate("resetMatchPending"), () => api("/api/matches/current/reset", { method: "POST" }));
         });
         actions.append(leaveButton, resetButton);
         container.append(actions);
@@ -1340,11 +1771,11 @@ ${isAdminPage ? `
         applyPayload(payload);
         render();
         if (state.match) {
-          setStatus("已恢复进行中的比赛。");
+          setStatus(translate("statusMatchRestored"));
           return;
         }
 
-        setStatus(state.user && state.user.isAdmin ? "已登录管理员账号。" : "准备开始新的比赛。");
+        setStatus(state.user && state.user.isAdmin ? translate("statusAdminLoggedIn") : translate("statusLobbyReady"));
       }
 
       const realtime = {
@@ -1362,7 +1793,7 @@ ${isAdminPage ? `
           render();
           setStatus(readyStatus());
         } catch (error) {
-          setStatus(error instanceof Error ? error.message : "同步失败");
+          setStatus(error instanceof Error ? error.message : translate("statusSyncFailed"));
         }
       }
 
@@ -1448,18 +1879,31 @@ ${isAdminPage ? `
 
       loadSession().catch((error) => {
         renderSignedOutView();
-        setStatus(error instanceof Error ? error.message : "连接失败");
+        setStatus(error instanceof Error ? error.message : translate("statusConnectionFailed"));
       });
     </script>
   </body>
 </html>`;
 }
 
-app.get("/", (c) => c.html(renderHomePage("lobby")));
+app.get("/", (c) => c.html(renderHomePage(c, "lobby")));
 
-app.get("/admin", (c) => c.html(renderHomePage("admin")));
+app.get("/admin", (c) => c.html(renderHomePage(c, "admin")));
 
 app.get("/health", (c) => c.json({ ok: true, projectName: PROJECT_NAME, workerName: PROJECT_NAME }));
+
+app.post("/api/locale", async (c) => {
+  const t = getI18n(c);
+  const payload = await readJson<{ locale?: unknown }>(c);
+  const locale = typeof payload?.locale === "string" ? normalizeLocale(payload.locale) : null;
+
+  if (!locale) {
+    return c.json({ error: t("errorLocaleInvalid") }, 400);
+  }
+
+  setLocaleCookie(c, locale);
+  return c.json({ ok: true, locale });
+});
 
 app.get("/api/session", async (c) => {
   await cleanupStaleMatches(c);
@@ -1475,6 +1919,7 @@ app.get("/api/session", async (c) => {
 });
 
 app.post("/api/admin/session", async (c) => {
+  const t = getI18n(c);
   const currentUser = await getAuthenticatedUser(c);
 
   if (currentUser) {
@@ -1485,7 +1930,7 @@ app.post("/api/admin/session", async (c) => {
     const currentContext = await loadCurrentMatchContext(c, currentUser);
 
     if (currentContext) {
-      return c.json({ error: "请先退出当前比赛后再使用管理员登录" }, 409);
+      return c.json({ error: t("errorNeedExitBeforeAdminLogin") }, 409);
     }
 
     await clearSession(c);
@@ -1495,25 +1940,26 @@ app.post("/api/admin/session", async (c) => {
   const password = typeof payload?.password === "string" ? payload.password : "";
 
   if (!password) {
-    return c.json({ error: "管理员密码必填" }, 400);
+    return c.json({ error: t("errorAdminPasswordRequired") }, 400);
   }
 
   const adminUser = await loginAdmin(c, password);
 
   if (!adminUser) {
-    return c.json({ error: "管理员密码错误" }, 401);
+    return c.json({ error: t("errorAdminPasswordInvalid") }, 401);
   }
 
   return c.json({ user: serializeUser(adminUser), match: null });
 });
 
 app.post("/api/matches", async (c) => {
+  const t = getI18n(c);
   await cleanupStaleMatches(c);
   const payload = await readJson<{ name?: unknown }>(c);
   const name = normalizeName(payload?.name);
 
   if (!name) {
-    return c.json({ error: `名字必填，且不能超过 ${MAX_NAME_LENGTH} 个字符` }, 400);
+    return c.json({ error: t("errorNameRequired", { max: String(MAX_NAME_LENGTH) }) }, 400);
   }
 
   const currentUser = await getAuthenticatedUser(c);
@@ -1526,7 +1972,7 @@ app.post("/api/matches", async (c) => {
   const existingContext = await loadCurrentMatchContext(c, user);
 
   if (existingContext) {
-    return c.json({ error: "你已经在另一场比赛里了，请先退出当前比赛" }, 409);
+    return c.json({ error: t("errorAlreadyInOtherMatch") }, 409);
   }
 
   const db = getDatabase(c);
@@ -1570,17 +2016,18 @@ app.post("/api/matches", async (c) => {
 });
 
 app.post("/api/matches/join", async (c) => {
+  const t = getI18n(c);
   await cleanupStaleMatches(c);
   const payload = await readJson<{ name?: unknown; code?: unknown }>(c);
   const name = normalizeName(payload?.name);
   const code = normalizeCode(payload?.code);
 
   if (!name) {
-    return c.json({ error: `名字必填，且不能超过 ${MAX_NAME_LENGTH} 个字符` }, 400);
+    return c.json({ error: t("errorNameRequired", { max: String(MAX_NAME_LENGTH) }) }, 400);
   }
 
   if (!code) {
-    return c.json({ error: "比赛编号格式不正确" }, 400);
+    return c.json({ error: t("errorMatchCodeInvalid") }, 400);
   }
 
   const currentUser = await getAuthenticatedUser(c);
@@ -1598,14 +2045,14 @@ app.post("/api/matches/join", async (c) => {
       return c.json({ user: serializeUser(user), match: matchState });
     }
 
-    return c.json({ error: "你已经在另一场比赛里了，请先退出当前比赛" }, 409);
+    return c.json({ error: t("errorAlreadyInOtherMatch") }, 409);
   }
 
   const db = getDatabase(c);
   const match = await db.select().from(matches).where(eq(matches.code, code)).get();
 
   if (!match) {
-    return c.json({ error: "没有找到这个比赛编号" }, 404);
+    return c.json({ error: t("errorMatchCodeNotFound") }, 404);
   }
 
   let updateValues: Partial<typeof matches.$inferInsert> | null = null;
@@ -1615,7 +2062,7 @@ app.post("/api/matches/join", async (c) => {
   } else if (!match.player2UserId) {
     updateValues = { player2UserId: user.id, player2Name: name };
   } else {
-    return c.json({ error: "这场比赛已经满员了" }, 409);
+    return c.json({ error: t("errorMatchFull") }, 409);
   }
 
   const now = new Date();
@@ -1642,6 +2089,7 @@ app.post("/api/matches/join", async (c) => {
 });
 
 app.post("/api/matches/current/target-wins", async (c) => {
+  const t = getI18n(c);
   const current = await ensureCurrentMatch(c);
 
   if (current.response) {
@@ -1652,7 +2100,7 @@ app.post("/api/matches/current/target-wins", async (c) => {
   const parsedValue = parseInteger(payload?.value);
 
   if (parsedValue == null) {
-    return c.json({ error: "目标局数必须是整数" }, 400);
+    return c.json({ error: t("errorTargetWinsInteger") }, 400);
   }
 
   const nextTargetWins = clamp(parsedValue, 1, MAX_TARGET_WINS);
@@ -1677,6 +2125,7 @@ app.post("/api/matches/current/target-wins", async (c) => {
 });
 
 app.post("/api/matches/current/frames/:frameNumber/winner", async (c) => {
+  const t = getI18n(c);
   const current = await ensureCurrentMatch(c);
 
   if (current.response) {
@@ -1687,13 +2136,13 @@ app.post("/api/matches/current/frames/:frameNumber/winner", async (c) => {
   const frameNumber = Number(c.req.param("frameNumber"));
 
   if (!Number.isInteger(frameNumber) || frameNumber <= 0) {
-    return c.json({ error: "局数不正确" }, 400);
+    return c.json({ error: t("errorFrameInvalid") }, 400);
   }
 
   const slot = payload?.slot === null ? null : parseInteger(payload?.slot);
 
   if (slot !== null && slot !== 1 && slot !== 2) {
-    return c.json({ error: "胜利方必须是 1、2 或空值" }, 400);
+    return c.json({ error: t("errorWinnerSlotInvalid") }, 400);
   }
 
   const db = getDatabase(c);
@@ -1704,7 +2153,7 @@ app.post("/api/matches/current/frames/:frameNumber/winner", async (c) => {
     .get();
 
   if (!frame) {
-    return c.json({ error: "没有找到这一局" }, 404);
+    return c.json({ error: t("errorFrameNotFound") }, 404);
   }
 
   if (frame.winnerSlot === slot) {
@@ -1732,6 +2181,7 @@ app.post("/api/matches/current/frames/:frameNumber/winner", async (c) => {
 });
 
 app.post("/api/matches/current/frames/:frameNumber/fouls", async (c) => {
+  const t = getI18n(c);
   const current = await ensureCurrentMatch(c);
 
   if (current.response) {
@@ -1744,15 +2194,15 @@ app.post("/api/matches/current/frames/:frameNumber/fouls", async (c) => {
   const value = parseInteger(payload?.value);
 
   if (!Number.isInteger(frameNumber) || frameNumber <= 0) {
-    return c.json({ error: "局数不正确" }, 400);
+    return c.json({ error: t("errorFrameInvalid") }, 400);
   }
 
   if (slot !== 1 && slot !== 2) {
-    return c.json({ error: "犯规方必须是 1 或 2" }, 400);
+    return c.json({ error: t("errorFoulSlotInvalid") }, 400);
   }
 
   if (value == null) {
-    return c.json({ error: "犯规次数必须是整数" }, 400);
+    return c.json({ error: t("errorFoulValueInteger") }, 400);
   }
 
   const nextValue = clamp(value, 0, MAX_FOULS);
@@ -1764,7 +2214,7 @@ app.post("/api/matches/current/frames/:frameNumber/fouls", async (c) => {
     .get();
 
   if (!frame) {
-    return c.json({ error: "没有找到这一局" }, 404);
+    return c.json({ error: t("errorFrameNotFound") }, 404);
   }
 
   const currentValue = slot === 1 ? frame.player1Fouls : frame.player2Fouls;
@@ -1868,14 +2318,15 @@ app.delete("/api/session", async (c) => {
 });
 
 app.get("/api/matches/current/socket", async (c) => {
+  const t = getI18n(c);
   if (c.req.header("upgrade") !== "websocket") {
-    return c.text("expected websocket", 426);
+    return c.text(t("websocketExpected"), 426);
   }
 
   const user = await getAuthenticatedUser(c);
 
   if (!user) {
-    return c.json({ error: "需要先填写名字并进入比赛" }, 401);
+    return c.json({ error: t("errorNeedNameAndMatch") }, 401);
   }
 
   if (isAdminUser(user)) {
@@ -1885,7 +2336,7 @@ app.get("/api/matches/current/socket", async (c) => {
   const context = await loadCurrentMatchContext(c, user);
 
   if (!context) {
-    return c.json({ error: "当前没有进行中的比赛" }, 404);
+    return c.json({ error: t("errorNoCurrentMatch") }, 404);
   }
 
   const stub = getMatchRoomStub(c, context.match.id);
