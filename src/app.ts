@@ -19,6 +19,8 @@ type Bindings = {
 
 type AppContext = Context<{ Bindings: Bindings }>;
 
+type PlayerSlot = 1 | 2;
+
 type MatchState = {
   code: string;
   targetWins: number;
@@ -30,7 +32,8 @@ type MatchState = {
   }>;
   frames: Array<{
     number: number;
-    winnerSlot: 1 | 2 | null;
+    breakerSlot: PlayerSlot;
+    winnerSlot: PlayerSlot | null;
     player1Fouls: number;
     player2Fouls: number;
   }>;
@@ -108,6 +111,9 @@ const messages = {
     targetWinsCardTitle: "胜利所需局数",
     updateTargetWinsPending: "正在更新目标局数…",
     frameTitle: "第 {frameNumber} 局",
+    breakerLabel: "开球方: {name}",
+    changeBreakerButton: "更换发球方",
+    changeBreakerPending: "正在更换开球方…",
     clearWinner: "清空胜负",
     defaultPlayer: "玩家{slot}",
     winButton: "{name} · win",
@@ -132,6 +138,8 @@ const messages = {
     errorMatchFull: "这场比赛已经满员了",
     errorTargetWinsInteger: "目标局数必须是整数",
     errorFrameInvalid: "局数不正确",
+    errorBreakerSlotInvalid: "开球方必须是 1 或 2",
+    errorBreakerPlayerMissing: "开球方必须是当前在场玩家",
     errorWinnerSlotInvalid: "胜利方必须是 1、2 或空值",
     errorFrameNotFound: "没有找到这一局",
     errorFoulSlotInvalid: "犯规方必须是 1 或 2",
@@ -198,6 +206,9 @@ const messages = {
     targetWinsCardTitle: "Frames Needed to Win",
     updateTargetWinsPending: "Updating target frames…",
     frameTitle: "Frame {frameNumber}",
+    breakerLabel: "Break by: {name}",
+    changeBreakerButton: "Change breaker",
+    changeBreakerPending: "Changing breaker…",
     clearWinner: "Clear Winner",
     defaultPlayer: "Player {slot}",
     winButton: "{name} · win",
@@ -222,6 +233,8 @@ const messages = {
     errorMatchFull: "This match is already full",
     errorTargetWinsInteger: "Target frames must be an integer",
     errorFrameInvalid: "Invalid frame number",
+    errorBreakerSlotInvalid: "Breaker slot must be 1 or 2",
+    errorBreakerPlayerMissing: "Breaker must be one of the active players",
     errorWinnerSlotInvalid: "Winner slot must be 1, 2, or null",
     errorFrameNotFound: "Frame not found",
     errorFoulSlotInvalid: "Foul slot must be 1 or 2",
@@ -350,6 +363,70 @@ function clamp(value: number, minimum: number, maximum: number) {
   return Math.min(maximum, Math.max(minimum, value));
 }
 
+function isPlayerSlot(value: unknown): value is PlayerSlot {
+  return value === 1 || value === 2;
+}
+
+function oppositeSlot(slot: PlayerSlot): PlayerSlot {
+  return slot === 1 ? 2 : 1;
+}
+
+function hasPlayerInSlot(match: Match, slot: PlayerSlot) {
+  return slot === 1 ? Boolean(match.player1UserId) : Boolean(match.player2UserId);
+}
+
+function resolveOpeningSlot(match: Match): PlayerSlot {
+  if (isPlayerSlot(match.openingSlot) && hasPlayerInSlot(match, match.openingSlot)) {
+    return match.openingSlot;
+  }
+
+  if (match.player1UserId) {
+    return 1;
+  }
+
+  if (match.player2UserId) {
+    return 2;
+  }
+
+  return isPlayerSlot(match.openingSlot) ? match.openingSlot : 1;
+}
+
+function resolveAvailableSlot(match: Match, preferredSlot: PlayerSlot | null) {
+  if (preferredSlot && hasPlayerInSlot(match, preferredSlot)) {
+    return preferredSlot;
+  }
+
+  if (preferredSlot) {
+    const alternateSlot = oppositeSlot(preferredSlot);
+
+    if (hasPlayerInSlot(match, alternateSlot)) {
+      return alternateSlot;
+    }
+  }
+
+  return resolveOpeningSlot(match);
+}
+
+function resolveFrameBreakerSlot(match: Match, frame: Frame, previousBreakerSlot: PlayerSlot | null) {
+  const preferredSlot = isPlayerSlot(frame.breakerSlot)
+    ? frame.breakerSlot
+    : previousBreakerSlot
+      ? oppositeSlot(previousBreakerSlot)
+      : resolveOpeningSlot(match);
+
+  return resolveAvailableSlot(match, preferredSlot);
+}
+
+function resolveFrameBreakerSlots(match: Match, frameRows: Frame[]) {
+  let previousBreakerSlot: PlayerSlot | null = null;
+
+  return frameRows.map((frame) => {
+    const breakerSlot = resolveFrameBreakerSlot(match, frame, previousBreakerSlot);
+    previousBreakerSlot = breakerSlot;
+    return breakerSlot;
+  });
+}
+
 function playerName(t: Translate, match: Match, slot: 1 | 2) {
   const name = slot === 1 ? match.player1Name : match.player2Name;
   return name || t("defaultPlayer", { slot: String(slot) });
@@ -441,6 +518,7 @@ async function normalizeFrames(c: AppContext, match: Match) {
     await db.insert(frames).values({
       matchId: match.id,
       frameNumber: 1,
+      breakerSlot: null,
       winnerSlot: null,
       player1Fouls: 0,
       player2Fouls: 0,
@@ -484,6 +562,7 @@ async function normalizeFrames(c: AppContext, match: Match) {
     await db.insert(frames).values({
       matchId: match.id,
       frameNumber: lastFrame.frameNumber + 1,
+      breakerSlot: null,
       winnerSlot: null,
       player1Fouls: 0,
       player2Fouls: 0,
@@ -504,6 +583,7 @@ async function loadMatchState(c: AppContext, matchId: string, currentUserId: num
 
   await normalizeFrames(c, match);
   const frameRows = await db.select().from(frames).where(eq(frames.matchId, match.id)).orderBy(asc(frames.frameNumber)).all();
+  const breakerSlots = resolveFrameBreakerSlots(match, frameRows);
   const totalWins = calculateTotalWins(frameRows);
   const winnerSlot = determineWinnerSlot(match, frameRows);
   const winnerMessage = winnerSlot
@@ -533,8 +613,9 @@ async function loadMatchState(c: AppContext, matchId: string, currentUserId: num
         isSelf: match.player2UserId === currentUserId,
       },
     ],
-    frames: frameRows.map((frame) => ({
+    frames: frameRows.map((frame, index) => ({
       number: frame.frameNumber,
+      breakerSlot: breakerSlots[index]!,
       winnerSlot: frame.winnerSlot === 1 || frame.winnerSlot === 2 ? frame.winnerSlot : null,
       player1Fouls: frame.player1Fouls,
       player2Fouls: frame.player2Fouls,
@@ -764,6 +845,9 @@ function renderHomePage(c: AppContext, pageMode: "lobby" | "admin" = "lobby") {
       "targetWinsCardTitle",
       "updateTargetWinsPending",
       "frameTitle",
+      "breakerLabel",
+      "changeBreakerButton",
+      "changeBreakerPending",
       "clearWinner",
       "winButton",
       "foulLabel",
@@ -983,6 +1067,13 @@ function renderHomePage(c: AppContext, pageMode: "lobby" | "admin" = "lobby") {
         align-items: center;
         gap: 12px;
       }
+      .breaker-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
       .winner-row {
         display: grid;
         grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1062,6 +1153,7 @@ function renderHomePage(c: AppContext, pageMode: "lobby" | "admin" = "lobby") {
         user: null,
         match: null,
         targetWinsPending: false,
+        pendingBreakers: {},
         pendingWinners: {},
         pendingFouls: {},
       };
@@ -1072,7 +1164,7 @@ function renderHomePage(c: AppContext, pageMode: "lobby" | "admin" = "lobby") {
 
       function translate(key, params = {}) {
         const template = translations[key] || key;
-        return String(template).replace(/\{(\w+)\}/g, (_, name) => {
+        return String(template).replace(/\\{(\\w+)\\}/g, (_, name) => {
           const value = params[name];
           return value == null ? "" : String(value);
         });
@@ -1092,6 +1184,7 @@ function renderHomePage(c: AppContext, pageMode: "lobby" | "admin" = "lobby") {
 
       function resetMatchInteractionState() {
         state.targetWinsPending = false;
+        state.pendingBreakers = {};
         state.pendingWinners = {};
         state.pendingFouls = {};
       }
@@ -1101,6 +1194,10 @@ function renderHomePage(c: AppContext, pageMode: "lobby" | "admin" = "lobby") {
       }
 
       function winnerKey(frameNumber) {
+        return String(frameNumber);
+      }
+
+      function breakerKey(frameNumber) {
         return String(frameNumber);
       }
 
@@ -1134,6 +1231,12 @@ function renderHomePage(c: AppContext, pageMode: "lobby" | "admin" = "lobby") {
         }
 
         const activeFrames = new Set(state.match.frames.map((frame) => String(frame.number)));
+
+        for (const key of Object.keys(state.pendingBreakers)) {
+          if (!activeFrames.has(key)) {
+            delete state.pendingBreakers[key];
+          }
+        }
 
         for (const key of Object.keys(state.pendingWinners)) {
           if (!activeFrames.has(key)) {
@@ -1310,6 +1413,27 @@ function renderHomePage(c: AppContext, pageMode: "lobby" | "admin" = "lobby") {
           }));
         } finally {
           state.targetWinsPending = false;
+          render();
+        }
+      }
+
+      async function commitBreaker(frameNumber, slot) {
+        const key = breakerKey(frameNumber);
+
+        if (state.pendingBreakers[key]) {
+          return;
+        }
+
+        state.pendingBreakers[key] = true;
+        render();
+
+        try {
+          await runAction(translate("changeBreakerPending"), () => api("/api/matches/current/frames/" + frameNumber + "/breaker", {
+            method: "POST",
+            body: JSON.stringify({ slot })
+          }));
+        } finally {
+          delete state.pendingBreakers[key];
           render();
         }
       }
@@ -1694,8 +1818,12 @@ ${isAdminPage ? `
 
         const frameList = make("div", { className: "frame-list" });
         match.frames.forEach((frame) => {
+          const breakerPending = Boolean(state.pendingBreakers[breakerKey(frame.number)]);
           const winnerPending = Boolean(state.pendingWinners[winnerKey(frame.number)]);
           const displayedWinnerSlot = getDisplayedWinnerSlot(frame);
+          const breakerPlayer = match.players.find((player) => player.slot === frame.breakerSlot) || match.players[0];
+          const canChangeBreaker = match.players.filter((player) => player.occupied).length === 2;
+          const nextBreakerSlot = frame.breakerSlot === 1 ? 2 : 1;
           const frameCard = make("div", { className: "frame-card" });
           const frameHead = make("div", { className: "frame-head" });
           frameHead.append(make("h3", { text: translate("frameTitle", { frameNumber: frame.number }) }));
@@ -1708,6 +1836,16 @@ ${isAdminPage ? `
             frameHead.append(clearButton);
           }
           frameCard.append(frameHead);
+
+          const breakerRow = make("div", { className: "breaker-row" });
+          breakerRow.append(make("p", { text: translate("breakerLabel", { name: playerLabel(breakerPlayer) }) }));
+          const breakerButton = make("button", { className: "ghost clear-button", text: translate("changeBreakerButton") });
+          breakerButton.disabled = breakerPending || !canChangeBreaker;
+          breakerButton.addEventListener("click", () => {
+            void commitBreaker(frame.number, nextBreakerSlot);
+          });
+          breakerRow.append(breakerButton);
+          frameCard.append(breakerRow);
 
           const winnerRow = make("div", { className: "winner-row" + (winnerPending ? " pending" : "") });
           match.players.forEach((player) => {
@@ -1984,6 +2122,7 @@ app.post("/api/matches", async (c) => {
     id: matchId,
     code,
     targetWins: DEFAULT_TARGET_WINS,
+    openingSlot: 1,
     player1UserId: user.id,
     player1Name: name,
     player2UserId: null,
@@ -1995,6 +2134,7 @@ app.post("/api/matches", async (c) => {
   await db.insert(frames).values({
     matchId,
     frameNumber: 1,
+    breakerSlot: null,
     winnerSlot: null,
     player1Fouls: 0,
     player2Fouls: 0,
@@ -2116,6 +2256,61 @@ app.post("/api/matches/current/target-wins", async (c) => {
     .update(matches)
     .set({
       targetWins: nextTargetWins,
+      updatedAt: now,
+    })
+    .where(eq(matches.id, current.context!.match.id));
+
+  notifyMatchRoom(c, current.context!.match.id);
+  return respondWithCurrentState(c, current.user!);
+});
+
+app.post("/api/matches/current/frames/:frameNumber/breaker", async (c) => {
+  const t = getI18n(c);
+  const current = await ensureCurrentMatch(c);
+
+  if (current.response) {
+    return current.response;
+  }
+
+  const payload = await readJson<{ slot?: unknown }>(c);
+  const frameNumber = Number(c.req.param("frameNumber"));
+  const slot = parseInteger(payload?.slot);
+
+  if (!Number.isInteger(frameNumber) || frameNumber <= 0) {
+    return c.json({ error: t("errorFrameInvalid") }, 400);
+  }
+
+  if (!isPlayerSlot(slot)) {
+    return c.json({ error: t("errorBreakerSlotInvalid") }, 400);
+  }
+
+  if (!hasPlayerInSlot(current.context!.match, slot)) {
+    return c.json({ error: t("errorBreakerPlayerMissing") }, 409);
+  }
+
+  const db = getDatabase(c);
+  const frame = await db
+    .select()
+    .from(frames)
+    .where(and(eq(frames.matchId, current.context!.match.id), eq(frames.frameNumber, frameNumber)))
+    .get();
+
+  if (!frame) {
+    return c.json({ error: t("errorFrameNotFound") }, 404);
+  }
+
+  const now = new Date();
+  await db
+    .update(frames)
+    .set({
+      breakerSlot: slot,
+      updatedAt: now,
+    })
+    .where(eq(frames.id, frame.id));
+
+  await db
+    .update(matches)
+    .set({
       updatedAt: now,
     })
     .where(eq(matches.id, current.context!.match.id));
@@ -2257,6 +2452,7 @@ app.post("/api/matches/current/reset", async (c) => {
   await db.insert(frames).values({
     matchId: current.context!.match.id,
     frameNumber: 1,
+    breakerSlot: null,
     winnerSlot: null,
     player1Fouls: 0,
     player2Fouls: 0,
@@ -2284,11 +2480,32 @@ app.post("/api/matches/current/leave", async (c) => {
 
   const db = getDatabase(c);
   const now = new Date();
+  const remainingSlot = current.context!.slot === 1
+    ? current.context!.match.player2UserId ? 2 : null
+    : current.context!.match.player1UserId ? 1 : null;
   const updates = current.context!.slot === 1
-    ? { player1UserId: null, player1Name: null, updatedAt: now }
-    : { player2UserId: null, player2Name: null, updatedAt: now };
+    ? { player1UserId: null, player1Name: null, openingSlot: remainingSlot ?? current.context!.match.openingSlot, updatedAt: now }
+    : { player2UserId: null, player2Name: null, openingSlot: remainingSlot ?? current.context!.match.openingSlot, updatedAt: now };
 
   await db.update(matches).set(updates).where(eq(matches.id, current.context!.match.id));
+
+  if (remainingSlot) {
+    await db
+      .update(frames)
+      .set({
+        breakerSlot: remainingSlot,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(frames.matchId, current.context!.match.id),
+          isNull(frames.winnerSlot),
+          eq(frames.player1Fouls, 0),
+          eq(frames.player2Fouls, 0),
+        ),
+      );
+  }
+
   await db
     .update(users)
     .set({

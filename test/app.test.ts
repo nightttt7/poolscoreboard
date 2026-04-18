@@ -24,10 +24,10 @@ async function resetDatabase() {
     "CREATE TABLE sessions (id TEXT PRIMARY KEY NOT NULL, user_id INTEGER NOT NULL, token_hash TEXT NOT NULL UNIQUE, expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL, FOREIGN KEY (user_id) REFERENCES users(id))"
   );
   await env.DB.exec(
-    "CREATE TABLE matches (id TEXT PRIMARY KEY NOT NULL, code TEXT NOT NULL UNIQUE, target_wins INTEGER NOT NULL DEFAULT 7, player1_user_id INTEGER, player1_name TEXT, player2_user_id INTEGER, player2_name TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)"
+    "CREATE TABLE matches (id TEXT PRIMARY KEY NOT NULL, code TEXT NOT NULL UNIQUE, target_wins INTEGER NOT NULL DEFAULT 7, opening_slot INTEGER NOT NULL DEFAULT 1, player1_user_id INTEGER, player1_name TEXT, player2_user_id INTEGER, player2_name TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)"
   );
   await env.DB.exec(
-    "CREATE TABLE frames (id INTEGER PRIMARY KEY AUTOINCREMENT, match_id TEXT NOT NULL, frame_number INTEGER NOT NULL, winner_slot INTEGER, player1_fouls INTEGER NOT NULL DEFAULT 0, player2_fouls INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, FOREIGN KEY (match_id) REFERENCES matches(id))"
+    "CREATE TABLE frames (id INTEGER PRIMARY KEY AUTOINCREMENT, match_id TEXT NOT NULL, frame_number INTEGER NOT NULL, breaker_slot INTEGER, winner_slot INTEGER, player1_fouls INTEGER NOT NULL DEFAULT 0, player2_fouls INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, FOREIGN KEY (match_id) REFERENCES matches(id))"
   );
 }
 
@@ -53,6 +53,7 @@ describe("pool scoreboard app", () => {
     expect(html).toContain("开启新比赛");
     expect(html).toContain("创建后把比赛编号告知另一位玩家即可。");
     expect(html).toContain("输入比赛编号");
+    expect(html).toContain(String.raw`replace(/\{(\w+)\}/g`);
     expect(html).not.toContain("管理员密码");
     expect(html).not.toContain("前往 Admin 页面");
     expect(html).not.toContain("输入名字即可开始，对手通过比赛编号加入。");
@@ -208,11 +209,12 @@ describe("pool scoreboard app", () => {
     );
 
     expect(createRes.status).toBe(201);
-    const createBody = (await createRes.json()) as { match: { code: string; frames: Array<{ number: number }> } };
+    const createBody = (await createRes.json()) as { match: { code: string; frames: Array<{ number: number; breakerSlot: number }> } };
     const aliceCookie = cookieFrom(createRes);
     expect(aliceCookie).toBeTruthy();
     expect(createBody.match.code).toMatch(/^\d{2,}$/);
     expect(createBody.match.frames).toHaveLength(1);
+    expect(createBody.match.frames[0]).toMatchObject({ number: 1, breakerSlot: 1 });
 
     const joinRes = await app.request(
       "http://localhost/api/matches/join",
@@ -256,6 +258,27 @@ describe("pool scoreboard app", () => {
     );
     expect(foulsRes.status).toBe(200);
 
+    const breakerRes = await app.request(
+      "http://localhost/api/matches/current/frames/1/breaker",
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          cookie: aliceCookie!,
+        },
+        body: JSON.stringify({ slot: 2 }),
+      },
+      env,
+    );
+    const breakerBody = (await breakerRes.json()) as {
+      match: {
+        frames: Array<{ number: number; breakerSlot: number }>;
+      };
+    };
+
+    expect(breakerRes.status).toBe(200);
+    expect(breakerBody.match.frames[0]).toMatchObject({ number: 1, breakerSlot: 2 });
+
     const firstWinRes = await app.request(
       "http://localhost/api/matches/current/frames/1/winner",
       {
@@ -270,7 +293,7 @@ describe("pool scoreboard app", () => {
     );
     const firstWinBody = (await firstWinRes.json()) as {
       match: {
-        frames: Array<{ number: number; winnerSlot: number | null; player2Fouls: number }>;
+        frames: Array<{ number: number; breakerSlot: number; winnerSlot: number | null; player2Fouls: number }>;
         totalWins: { 1: number; 2: number };
         winnerMessage: string | null;
       };
@@ -279,8 +302,8 @@ describe("pool scoreboard app", () => {
     expect(firstWinRes.status).toBe(200);
     expect(firstWinBody.match.totalWins).toEqual({ 1: 1, 2: 0 });
     expect(firstWinBody.match.frames).toHaveLength(2);
-    expect(firstWinBody.match.frames[0]).toMatchObject({ number: 1, winnerSlot: 1, player2Fouls: 2 });
-    expect(firstWinBody.match.frames[1]).toMatchObject({ number: 2, winnerSlot: null });
+    expect(firstWinBody.match.frames[0]).toMatchObject({ number: 1, breakerSlot: 2, winnerSlot: 1, player2Fouls: 2 });
+    expect(firstWinBody.match.frames[1]).toMatchObject({ number: 2, breakerSlot: 1, winnerSlot: null });
     expect(firstWinBody.match.winnerMessage).toBeNull();
 
     const secondWinRes = await app.request(
@@ -485,17 +508,17 @@ describe("pool scoreboard app", () => {
     );
     const bobCookie = cookieFrom(bobJoinRes)!;
 
-    const bobLeaveRes = await app.request(
+    const aliceLeaveRes = await app.request(
       "http://localhost/api/matches/current/leave",
       {
         method: "POST",
-        headers: { cookie: bobCookie },
+        headers: { cookie: aliceCookie },
       },
       env,
     );
-    expect(bobLeaveRes.status).toBe(200);
-    const bobLeaveBody = (await bobLeaveRes.json()) as { match: null };
-    expect(bobLeaveBody.match).toBeNull();
+    expect(aliceLeaveRes.status).toBe(200);
+    const aliceLeaveBody = (await aliceLeaveRes.json()) as { match: null };
+    expect(aliceLeaveBody.match).toBeNull();
 
     const charlieJoinRes = await app.request(
       "http://localhost/api/matches/join",
@@ -508,18 +531,34 @@ describe("pool scoreboard app", () => {
     );
     expect(charlieJoinRes.status).toBe(200);
 
+    const bobSessionRes = await app.request(
+      "http://localhost/api/session",
+      {
+        headers: { cookie: bobCookie },
+      },
+      env,
+    );
+    const bobSessionBody = (await bobSessionRes.json()) as {
+      match: {
+        frames: Array<{ number: number; breakerSlot: number }>;
+      } | null;
+    };
+
+    expect(bobSessionRes.status).toBe(200);
+    expect(bobSessionBody.match?.frames[0]).toMatchObject({ number: 1, breakerSlot: 2 });
+
     await env.DB.exec("UPDATE matches SET updated_at = 0");
 
     const sessionRes = await app.request(
       "http://localhost/api/session",
       {
-        headers: { cookie: aliceCookie },
+        headers: { cookie: bobCookie },
       },
       env,
     );
     const sessionBody = (await sessionRes.json()) as { match: null; user: { name: string } | null };
     expect(sessionRes.status).toBe(200);
-    expect(sessionBody.user).toMatchObject({ name: "Alice" });
+    expect(sessionBody.user).toMatchObject({ name: "Bob" });
     expect(sessionBody.match).toBeNull();
 
     const missingJoinRes = await app.request(
