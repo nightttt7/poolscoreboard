@@ -436,10 +436,10 @@ function notifyMatchRoom(c: AppContext, matchId: string) {
 function renderHomePage(pageMode: "lobby" | "admin" = "lobby") {
   const isAdminPage = pageMode === "admin";
   const pageTitle = isAdminPage ? `${PROJECT_NAME} Admin` : PROJECT_NAME;
-  const heroBadge = isAdminPage ? "Admin 入口 · 固定账号" : "手机优先 · 双人台球计分板";
+  const heroBadge = isAdminPage ? "Admin 入口 · 固定账号" : "台球计分板";
   const heroDescription = isAdminPage
     ? "使用固定 admin 账号进入独立管理页面。"
-    : "输入名字即可开始，对手通过比赛编号加入。";
+    : null;
 
   return `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -658,7 +658,7 @@ function renderHomePage(pageMode: "lobby" | "admin" = "lobby") {
       <section class="panel hero">
         <span class="badge">${heroBadge}</span>
         <h1>${PROJECT_NAME}</h1>
-        <p>${heroDescription}</p>
+        ${heroDescription ? `<p>${heroDescription}</p>` : ""}
       </section>
       <section class="panel">
         <div class="status" id="status">正在连接…</div>
@@ -1130,8 +1130,8 @@ ${isAdminPage ? `
 
         const intro = make("div", { className: "stack" });
         intro.append(
-          make("h2", { text: state.user ? "你好，" + state.user.name : "开始一场新比赛" }),
-          make("p", { text: "同一时间一个名字只能在一场比赛里。创建后把比赛编号发给另一位玩家即可。" })
+          make("h2", { text: "开始一场新比赛" }),
+          make("p", { text: "创建后把比赛编号告知另一位玩家即可。" })
         );
 
         const nameField = make("label", { className: "field" });
@@ -1160,7 +1160,7 @@ ${isAdminPage ? `
         codeField.append(
           make("span", { text: "比赛编号" }),
           make("input", {
-            placeholder: "输入两位数或更多编号",
+            placeholder: "输入比赛编号",
             inputMode: "numeric"
           })
         );

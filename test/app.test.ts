@@ -49,10 +49,13 @@ describe("pool scoreboard app", () => {
 
     const html = await res.text();
     expect(html).toContain(PROJECT_NAME);
-    expect(html).toContain("双人台球计分板");
+    expect(html).toContain("台球计分板");
     expect(html).toContain("开启新比赛");
+    expect(html).toContain("创建后把比赛编号告知另一位玩家即可。");
+    expect(html).toContain("输入比赛编号");
     expect(html).not.toContain("管理员密码");
     expect(html).not.toContain("前往 Admin 页面");
+    expect(html).not.toContain("输入名字即可开始，对手通过比赛编号加入。");
     expect(html).toContain("grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));");
   });
 
