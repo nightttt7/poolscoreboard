@@ -74,7 +74,7 @@ describe("pool scoreboard app", () => {
 
     const html = await res.text();
     expect(html).toContain(`${PROJECT_NAME} Admin`);
-    expect(html).toContain("Admin 入口 · 固定账号");
+    expect(html).not.toContain("Admin 入口 · 固定账号");
     expect(html).toContain("管理员密码");
     expect(html).toContain("返回首页");
   });
@@ -762,6 +762,159 @@ describe("pool scoreboard app", () => {
       env,
     );
     expect(missingJoinRes.status).toBe(404);
+  });
+
+  it("allows changing breaker even when only one player is in the match", async () => {
+    const createRes = await app.request(
+      "http://localhost/api/matches",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "Solo" }),
+      },
+      env,
+    );
+    const cookie = cookieFrom(createRes)!;
+
+    const breakerRes = await app.request(
+      "http://localhost/api/matches/current/frames/1/breaker",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie },
+        body: JSON.stringify({ slot: 2 }),
+      },
+      env,
+    );
+    expect(breakerRes.status).toBe(200);
+    const breakerBody = (await breakerRes.json()) as {
+      match: { frames: Array<{ number: number; breakerSlot: number }> };
+    };
+    expect(breakerBody.match.frames[0]).toMatchObject({ number: 1, breakerSlot: 2 });
+  });
+
+  it("lets admins delete an archived match record", async () => {
+    const createRes = await app.request(
+      "http://localhost/api/matches",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "Solo" }),
+      },
+      env,
+    );
+    const createBody = (await createRes.json()) as { match: { code: string } };
+    const cookie = cookieFrom(createRes)!;
+
+    const leaveRes = await app.request(
+      "http://localhost/api/matches/current/leave",
+      { method: "POST", headers: { cookie } },
+      env,
+    );
+    expect(leaveRes.status).toBe(200);
+
+    const adminLoginRes = await app.request(
+      "http://localhost/api/admin/session",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ password: env.ADMIN_PASSWORD }),
+      },
+      env,
+    );
+    const adminCookie = cookieFrom(adminLoginRes)!;
+
+    const dashboardRes = await app.request(
+      "http://localhost/api/admin/dashboard",
+      { headers: { cookie: adminCookie } },
+      env,
+    );
+    const dashboardBody = (await dashboardRes.json()) as {
+      historyMatches: Array<{ matchId: string; archiveVersion: number; code: string }>;
+    };
+    const target = dashboardBody.historyMatches.find((m) => m.code === createBody.match.code);
+    expect(target).toBeTruthy();
+
+    const deleteRes = await app.request(
+      `http://localhost/api/admin/history/${encodeURIComponent(target!.matchId)}/${target!.archiveVersion}`,
+      { method: "DELETE", headers: { cookie: adminCookie } },
+      env,
+    );
+    expect(deleteRes.status).toBe(200);
+
+    const refreshed = await app.request(
+      "http://localhost/api/admin/dashboard",
+      { headers: { cookie: adminCookie } },
+      env,
+    );
+    const refreshedBody = (await refreshed.json()) as {
+      historyMatches: Array<{ code: string }>;
+    };
+    expect(refreshedBody.historyMatches.find((m) => m.code === createBody.match.code)).toBeUndefined();
+  });
+
+  it("requires admin auth to delete a history record", async () => {
+    const res = await app.request(
+      "http://localhost/api/admin/history/some-id/1",
+      { method: "DELETE" },
+      env,
+    );
+    expect(res.status).toBe(401);
+  });
+
+  it("lets admins force-end an active match and archives it as closed", async () => {
+    const createRes = await app.request(
+      "http://localhost/api/matches",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "Alice" }),
+      },
+      env,
+    );
+    const createBody = (await createRes.json()) as { match: { code: string } };
+
+    const adminLoginRes = await app.request(
+      "http://localhost/api/admin/session",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ password: env.ADMIN_PASSWORD }),
+      },
+      env,
+    );
+    const adminCookie = cookieFrom(adminLoginRes)!;
+
+    const dashboardRes = await app.request(
+      "http://localhost/api/admin/dashboard",
+      { headers: { cookie: adminCookie } },
+      env,
+    );
+    const dashboardBody = (await dashboardRes.json()) as {
+      ongoingMatches: Array<{ matchId: string; code: string }>;
+    };
+    const target = dashboardBody.ongoingMatches.find((m) => m.code === createBody.match.code);
+    expect(target).toBeTruthy();
+
+    const endRes = await app.request(
+      `http://localhost/api/admin/matches/${encodeURIComponent(target!.matchId)}/force-end`,
+      { method: "POST", headers: { cookie: adminCookie } },
+      env,
+    );
+    expect(endRes.status).toBe(200);
+
+    const refreshed = await app.request(
+      "http://localhost/api/admin/dashboard",
+      { headers: { cookie: adminCookie } },
+      env,
+    );
+    const refreshedBody = (await refreshed.json()) as {
+      ongoingMatches: Array<{ code: string }>;
+      historyMatches: Array<{ code: string; status: string }>;
+    };
+    expect(refreshedBody.ongoingMatches.find((m) => m.code === createBody.match.code)).toBeUndefined();
+    expect(refreshedBody.historyMatches.find((m) => m.code === createBody.match.code)).toMatchObject({
+      status: "closed",
+    });
   });
 
   it("rejects WebSocket upgrades without a session", async () => {

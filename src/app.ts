@@ -5,7 +5,7 @@ import { Hono } from "hono";
 import { getCookie, setCookie } from "hono/cookie";
 import { createI18n } from "hono-i18n";
 
-import { deleteArchivedMatch, loadAdminDashboard, renderAdminPage, syncArchivedMatch } from "./admin";
+import { deleteArchivedMatch, deleteArchivedMatchById, forceEndActiveMatch, loadAdminDashboard, renderAdminPage, syncArchivedMatch } from "./admin";
 import { clearSession, getAuthenticatedUser, isAdminUser, loginAdmin, upsertSessionUser } from "./auth";
 import { frames, matches, users, type Frame, type Match, type User } from "./db/schema";
 import { MatchRoom, matchRoomConnectUrl, matchRoomNotifyUrl } from "./match-room";
@@ -57,8 +57,8 @@ const messages = {
     appName: PROJECT_NAME,
     adminTitle: `${PROJECT_NAME} Admin`,
     heroBadgeLobby: "台球计分板",
-    heroBadgeAdmin: "Admin 入口 · 固定账号",
-    heroDescriptionAdmin: "使用固定 admin 账号进入独立管理页面。",
+    heroBadgeAdmin: "台球计分板 Admin",
+    heroDescriptionAdmin: "",
     statusConnecting: "正在连接…",
     statusMatchSynced: "已同步比赛状态。",
     statusAdminLoggedIn: "已登录管理员账号。",
@@ -112,6 +112,26 @@ const messages = {
     adminFramesTitle: "逐局详情",
     adminFrameSummary: "第 {frame} 局 · 开球 {breaker} · 胜方 {winner} · 犯规 {fouls1}/{fouls2}",
     adminNoWinner: "未定",
+    adminForceEndButton: "强制结束",
+    adminForceEndConfirm: "强制结束这场比赛？将归档为已关闭。",
+    adminForceEndPending: "正在结束比赛…",
+    adminDeleteHistoryButton: "删除",
+    adminDeleteHistoryConfirm: "删除该历史记录？此操作无法撤销。",
+    adminDeleteHistoryPending: "正在删除…",
+    adminCopySummary: "复制",
+    adminCopiedSuccess: "已复制到剪贴板。",
+    adminCopyFailed: "复制失败",
+    adminCopyHeadCode: "比赛编号:",
+    adminCopyPlayers: "玩家:",
+    adminCopyScore: "比分:",
+    adminCopyTarget: "目标:",
+    adminCopyWinner: "胜方:",
+    adminCopyStarted: "开始:",
+    adminCopyUpdated: "更新:",
+    adminCopyArchived: "归档:",
+    adminCopyFramesHeader: "局详情:",
+    errorMatchNotFound: "找不到该比赛",
+    errorHistoryNotFound: "找不到这条历史记录",
     lobbyCreateTitle: "开始一场新比赛",
     lobbyCreateHint: "创建后把比赛编号告知另一位玩家即可。",
     yourName: "你的名字",
@@ -177,8 +197,8 @@ const messages = {
     appName: PROJECT_NAME,
     adminTitle: `${PROJECT_NAME} Admin`,
     heroBadgeLobby: "Pool Scoreboard",
-    heroBadgeAdmin: "Admin Portal · Fixed Account",
-    heroDescriptionAdmin: "Use the fixed admin account on the dedicated admin page.",
+    heroBadgeAdmin: "Pool Scoreboard Admin",
+    heroDescriptionAdmin: "",
     statusConnecting: "Connecting…",
     statusMatchSynced: "Match state is in sync.",
     statusAdminLoggedIn: "Admin is signed in.",
@@ -232,6 +252,26 @@ const messages = {
     adminFramesTitle: "Frame Details",
     adminFrameSummary: "Frame {frame} · Break {breaker} · Winner {winner} · Fouls {fouls1}/{fouls2}",
     adminNoWinner: "Pending",
+    adminForceEndButton: "Force End",
+    adminForceEndConfirm: "Force-end this match? It will be archived as closed.",
+    adminForceEndPending: "Ending match…",
+    adminDeleteHistoryButton: "Delete",
+    adminDeleteHistoryConfirm: "Delete this history record? This action cannot be undone.",
+    adminDeleteHistoryPending: "Deleting…",
+    adminCopySummary: "Copy",
+    adminCopiedSuccess: "Copied to clipboard.",
+    adminCopyFailed: "Copy failed",
+    adminCopyHeadCode: "Match:",
+    adminCopyPlayers: "Players:",
+    adminCopyScore: "Score:",
+    adminCopyTarget: "Target:",
+    adminCopyWinner: "Winner:",
+    adminCopyStarted: "Started:",
+    adminCopyUpdated: "Updated:",
+    adminCopyArchived: "Archived:",
+    adminCopyFramesHeader: "Frames:",
+    errorMatchNotFound: "Match not found",
+    errorHistoryNotFound: "History record not found",
     lobbyCreateTitle: "Start a New Match",
     lobbyCreateHint: "Create a match and share the code with the other player.",
     yourName: "Your name",
@@ -459,11 +499,13 @@ function resolveAvailableSlot(match: Match, preferredSlot: PlayerSlot | null) {
 }
 
 function resolveFrameBreakerSlot(match: Match, frame: Frame, previousBreakerSlot: PlayerSlot | null) {
-  const preferredSlot = isPlayerSlot(frame.breakerSlot)
-    ? frame.breakerSlot
-    : previousBreakerSlot
-      ? oppositeSlot(previousBreakerSlot)
-      : resolveOpeningSlot(match);
+  if (isPlayerSlot(frame.breakerSlot)) {
+    return frame.breakerSlot;
+  }
+
+  const preferredSlot = previousBreakerSlot
+    ? oppositeSlot(previousBreakerSlot)
+    : resolveOpeningSlot(match);
 
   return resolveAvailableSlot(match, preferredSlot);
 }
@@ -1195,13 +1237,24 @@ function renderHomePage(c: AppContext, pageMode: "lobby" | "admin" = "lobby") {
         font-size: 0.82rem;
         color: #94a3b8;
       }
+      .score-grid.sticky {
+        position: sticky;
+        top: 0;
+        z-index: 10;
+        background: rgba(15, 23, 42, 0.95);
+        backdrop-filter: blur(8px);
+        padding: 8px;
+        margin: -8px;
+        border-radius: 16px;
+        box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
+      }
     </style>
   </head>
   <body>
     <main class="stack">
       <section class="panel hero">
         <div class="hero-top">
-          <span class="badge">${heroBadge}</span>
+          <h1 class="hero-title">${heroBadge}</h1>
           <div class="locale-switch" aria-label="${t("languageLabel")}">
             ${SUPPORTED_LOCALES.map((supportedLocale) => `
               <button
@@ -1212,7 +1265,6 @@ function renderHomePage(c: AppContext, pageMode: "lobby" | "admin" = "lobby") {
             `).join("")}
           </div>
         </div>
-        <h1>${PROJECT_NAME}</h1>
         ${heroDescription ? `<p>${heroDescription}</p>` : ""}
       </section>
       <section class="panel">
@@ -1866,7 +1918,7 @@ ${isAdminPage ? `
         header.append(titleBox, targetBox);
         container.append(header);
 
-        const scoreGrid = make("div", { className: "score-grid" });
+        const scoreGrid = make("div", { className: "score-grid sticky" });
         match.players.forEach((player) => {
           const card = make("div", { className: "score-card" });
           const nameRow = make("div");
@@ -1905,7 +1957,7 @@ ${isAdminPage ? `
           const winnerPending = Boolean(state.pendingWinners[winnerKey(frame.number)]);
           const displayedWinnerSlot = getDisplayedWinnerSlot(frame);
           const breakerPlayer = match.players.find((player) => player.slot === frame.breakerSlot) || match.players[0];
-          const canChangeBreaker = match.players.filter((player) => player.occupied).length === 2;
+          const canChangeBreaker = match.players.some((player) => player.occupied);
           const nextBreakerSlot = frame.breakerSlot === 1 ? 2 : 1;
           const frameCard = make("div", { className: "frame-card" });
           const frameHead = make("div", { className: "frame-head" });
@@ -2188,6 +2240,54 @@ app.get("/api/admin/dashboard", async (c) => {
   return c.json(await loadAdminDashboard(c.env.DB));
 });
 
+app.delete("/api/admin/history/:matchId/:archiveVersion", async (c) => {
+  const t = getI18n(c);
+  const admin = await ensureAdminSession(c);
+
+  if (admin.response) {
+    return admin.response;
+  }
+
+  const matchId = c.req.param("matchId");
+  const archiveVersion = Number(c.req.param("archiveVersion"));
+
+  if (!matchId || !Number.isInteger(archiveVersion) || archiveVersion <= 0) {
+    return c.json({ error: t("errorHistoryNotFound") }, 400);
+  }
+
+  const removed = await deleteArchivedMatchById(c.env.DB, matchId, archiveVersion);
+
+  if (!removed) {
+    return c.json({ error: t("errorHistoryNotFound") }, 404);
+  }
+
+  return c.json({ ok: true });
+});
+
+app.post("/api/admin/matches/:matchId/force-end", async (c) => {
+  const t = getI18n(c);
+  const admin = await ensureAdminSession(c);
+
+  if (admin.response) {
+    return admin.response;
+  }
+
+  const matchId = c.req.param("matchId");
+
+  if (!matchId) {
+    return c.json({ error: t("errorMatchNotFound") }, 400);
+  }
+
+  const ended = await forceEndActiveMatch(c.env.DB, matchId);
+
+  if (!ended) {
+    return c.json({ error: t("errorMatchNotFound") }, 404);
+  }
+
+  notifyMatchRoom(c, matchId);
+  return c.json({ ok: true });
+});
+
 app.post("/api/matches", async (c) => {
   const t = getI18n(c);
   await cleanupStaleMatches(c);
@@ -2394,10 +2494,6 @@ app.post("/api/matches/current/frames/:frameNumber/breaker", async (c) => {
 
   if (!isPlayerSlot(slot)) {
     return c.json({ error: t("errorBreakerSlotInvalid") }, 400);
-  }
-
-  if (!hasPlayerInSlot(current.context!.match, slot)) {
-    return c.json({ error: t("errorBreakerPlayerMissing") }, 409);
   }
 
   const db = getDatabase(c);
