@@ -460,40 +460,8 @@ function oppositeSlot(slot: PlayerSlot): PlayerSlot {
   return slot === 1 ? 2 : 1;
 }
 
-function hasPlayerInSlot(match: Match, slot: PlayerSlot) {
-  return slot === 1 ? Boolean(match.player1UserId) : Boolean(match.player2UserId);
-}
-
 function resolveOpeningSlot(match: Match): PlayerSlot {
-  if (isPlayerSlot(match.openingSlot) && hasPlayerInSlot(match, match.openingSlot)) {
-    return match.openingSlot;
-  }
-
-  if (match.player1UserId) {
-    return 1;
-  }
-
-  if (match.player2UserId) {
-    return 2;
-  }
-
   return isPlayerSlot(match.openingSlot) ? match.openingSlot : 1;
-}
-
-function resolveAvailableSlot(match: Match, preferredSlot: PlayerSlot | null) {
-  if (preferredSlot && hasPlayerInSlot(match, preferredSlot)) {
-    return preferredSlot;
-  }
-
-  if (preferredSlot) {
-    const alternateSlot = oppositeSlot(preferredSlot);
-
-    if (hasPlayerInSlot(match, alternateSlot)) {
-      return alternateSlot;
-    }
-  }
-
-  return resolveOpeningSlot(match);
 }
 
 function resolveFrameBreakerSlot(match: Match, frame: Frame, previousBreakerSlot: PlayerSlot | null) {
@@ -501,11 +469,9 @@ function resolveFrameBreakerSlot(match: Match, frame: Frame, previousBreakerSlot
     return frame.breakerSlot;
   }
 
-  const preferredSlot = previousBreakerSlot
+  return previousBreakerSlot
     ? oppositeSlot(previousBreakerSlot)
     : resolveOpeningSlot(match);
-
-  return resolveAvailableSlot(match, preferredSlot);
 }
 
 function resolveFrameBreakerSlots(match: Match, frameRows: Frame[]) {
