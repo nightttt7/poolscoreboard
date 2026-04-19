@@ -6,6 +6,9 @@
 - The initial admin account is `admin`; its initial password comes from the `ADMIN_PASSWORD` Worker secret and local shell environment variables. Do not replace this with a hardcoded password in source.
 - Keep the admin bootstrap simple: lazily create the `admin` user during login instead of adding separate migration bootstrap scripts unless the user explicitly asks for them.
 - Preserve the dedicated `/admin` login page. Do not reintroduce a visible admin password field on the homepage, and keep homepage player inputs treated as non-credential fields.
+- Keep admin dashboard concerns in a dedicated module instead of folding them back into the lobby shell in `src/app.ts`.
+- Preserve persistent match history in D1. Completed matches and fully closed or expired matches should be archived for admin review, and resetting a live match should start a new archive version instead of overwriting prior history.
+- Admin-only read surfaces such as match history and active-match dashboards must stay behind authenticated admin sessions.
 - When changing schema, auth, deployment, or project workflow, update the relevant instruction files in the same change. Instructions in this repo are expected to evolve continuously with the project.
 - Keep README short and human-focused. Put the most emphasis on steps AI cannot complete automatically, especially GitHub secrets, Cloudflare credentials, and local secret files.
 

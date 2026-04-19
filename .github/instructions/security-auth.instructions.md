@@ -14,6 +14,7 @@ description: Security and auth rules for poolscoreboard's D1-backed application 
 
 - The initial admin username is fixed as `admin`.
 - The initial admin password comes from the deployed Worker secret `ADMIN_PASSWORD`, and from the local `ADMIN_PASSWORD` environment variable during local development.
+- Admin-only read routes that expose live matches or archived match history must require an authenticated admin session.
 - For local development, document that `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, and `ADMIN_PASSWORD` must be configured as local environment variables instead of hardcoding secrets.
 - For GitHub Actions deploys, fail fast with a clear error if `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, or `ADMIN_PASSWORD` is missing from Actions secrets.
 - For GitHub Actions deploys, after resolving the remote D1 database id, make subsequent remote Wrangler commands use that resolved id instead of the placeholder `wrangler.jsonc` UUID.
@@ -25,6 +26,8 @@ description: Security and auth rules for poolscoreboard's D1-backed application 
 ## Schema Changes
 
 - Auth-related schema changes must preserve a path for bootstrapping a fresh environment from zero.
+- Match lifecycle changes that matter to admin operations should be persisted in D1 rather than kept only in transient in-memory state.
+- When a match is won or fully closed or expired, archive enough data for `/admin` to inspect both summary and frame-by-frame history later.
 - Keep migrations readable, but preserve numeric ordering prefixes.
 - If auth/session behavior changes, update tests to verify unauthenticated rejection and authenticated success.
 

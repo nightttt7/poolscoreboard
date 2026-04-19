@@ -12,6 +12,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import app from "../src/app";
 
 async function resetDatabase() {
+  await env.DB.exec("DROP TABLE IF EXISTS match_history");
   await env.DB.exec("DROP TABLE IF EXISTS frames");
   await env.DB.exec("DROP TABLE IF EXISTS matches");
   await env.DB.exec("DROP TABLE IF EXISTS sessions");
@@ -24,11 +25,15 @@ async function resetDatabase() {
     "CREATE TABLE sessions (id TEXT PRIMARY KEY NOT NULL, user_id INTEGER NOT NULL, token_hash TEXT NOT NULL UNIQUE, expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL, FOREIGN KEY (user_id) REFERENCES users(id))"
   );
   await env.DB.exec(
-    "CREATE TABLE matches (id TEXT PRIMARY KEY NOT NULL, code TEXT NOT NULL UNIQUE, target_wins INTEGER NOT NULL DEFAULT 7, opening_slot INTEGER NOT NULL DEFAULT 1, player1_user_id INTEGER, player1_name TEXT, player2_user_id INTEGER, player2_name TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)"
+    "CREATE TABLE matches (id TEXT PRIMARY KEY NOT NULL, code TEXT NOT NULL UNIQUE, target_wins INTEGER NOT NULL DEFAULT 7, opening_slot INTEGER NOT NULL DEFAULT 1, archive_version INTEGER NOT NULL DEFAULT 1, player1_user_id INTEGER, player1_name TEXT, player2_user_id INTEGER, player2_name TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)"
   );
   await env.DB.exec(
     "CREATE TABLE frames (id INTEGER PRIMARY KEY AUTOINCREMENT, match_id TEXT NOT NULL, frame_number INTEGER NOT NULL, breaker_slot INTEGER, winner_slot INTEGER, player1_fouls INTEGER NOT NULL DEFAULT 0, player2_fouls INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, FOREIGN KEY (match_id) REFERENCES matches(id))"
   );
+  await env.DB.exec(
+    "CREATE TABLE match_history (id INTEGER PRIMARY KEY AUTOINCREMENT, match_id TEXT NOT NULL, archive_version INTEGER NOT NULL, code TEXT NOT NULL, status TEXT NOT NULL, winner_slot INTEGER, target_wins INTEGER NOT NULL, player1_name TEXT, player2_name TEXT, player1_wins INTEGER NOT NULL, player2_wins INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, archived_at INTEGER NOT NULL, snapshot TEXT NOT NULL)"
+  );
+  await env.DB.exec("CREATE UNIQUE INDEX match_history_match_archive_version_unique ON match_history (match_id, archive_version)");
 }
 
 function cookieFrom(response: Response) {
@@ -195,6 +200,190 @@ describe("pool scoreboard app", () => {
 
     expect(createRes.status).toBe(403);
     await expect(createRes.json()).resolves.toEqual({ error: "管理员账号不能参与比赛" });
+  });
+
+  it("requires an authenticated admin session before reading the admin dashboard", async () => {
+    const res = await app.request("http://localhost/api/admin/dashboard", undefined, env);
+
+    expect(res.status).toBe(401);
+    await expect(res.json()).resolves.toEqual({ error: "请先登录管理员账号" });
+  });
+
+  it("shows ongoing matches separately from archived completed matches in the admin dashboard", async () => {
+    const createRes = await app.request(
+      "http://localhost/api/matches",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "Alice" }),
+      },
+      env,
+    );
+    const createBody = (await createRes.json()) as { match: { code: string } };
+    const aliceCookie = cookieFrom(createRes)!;
+
+    const joinRes = await app.request(
+      "http://localhost/api/matches/join",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "Bob", code: createBody.match.code }),
+      },
+      env,
+    );
+    const bobCookie = cookieFrom(joinRes)!;
+
+    const targetRes = await app.request(
+      "http://localhost/api/matches/current/target-wins",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: aliceCookie },
+        body: JSON.stringify({ value: 1 }),
+      },
+      env,
+    );
+    expect(targetRes.status).toBe(200);
+
+    const winRes = await app.request(
+      "http://localhost/api/matches/current/frames/1/winner",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: bobCookie },
+        body: JSON.stringify({ slot: 1 }),
+      },
+      env,
+    );
+    expect(winRes.status).toBe(200);
+
+    const historyRows = await env.DB.prepare("SELECT code, status, archive_version FROM match_history").all<{
+      code: string;
+      status: string;
+      archive_version: number;
+    }>();
+    expect(historyRows.results).toEqual([
+      expect.objectContaining({
+        code: createBody.match.code,
+        status: "completed",
+        archive_version: 1,
+      }),
+    ]);
+
+    const secondCreateRes = await app.request(
+      "http://localhost/api/matches",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "Carol" }),
+      },
+      env,
+    );
+    const secondCreateBody = (await secondCreateRes.json()) as { match: { code: string } };
+    expect(secondCreateRes.status).toBe(201);
+
+    const adminLoginRes = await app.request(
+      "http://localhost/api/admin/session",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ password: env.ADMIN_PASSWORD }),
+      },
+      env,
+    );
+    const adminCookie = cookieFrom(adminLoginRes)!;
+
+    const dashboardRes = await app.request(
+      "http://localhost/api/admin/dashboard",
+      {
+        headers: { cookie: adminCookie },
+      },
+      env,
+    );
+    const dashboardBody = (await dashboardRes.json()) as {
+      ongoingMatches: Array<{ code: string; status: string }>;
+      historyMatches: Array<{
+        code: string;
+        status: string;
+        winnerSlot: number | null;
+        totalWins: { 1: number; 2: number };
+        players: { 1: string | null; 2: string | null };
+      }>;
+    };
+
+    expect(dashboardRes.status).toBe(200);
+    expect(dashboardBody.ongoingMatches).toHaveLength(1);
+    expect(dashboardBody.ongoingMatches[0]).toMatchObject({ code: secondCreateBody.match.code, status: "ongoing" });
+    expect(dashboardBody.historyMatches).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: createBody.match.code,
+          status: "completed",
+          winnerSlot: 1,
+          totalWins: { 1: 1, 2: 0 },
+          players: { 1: "Alice", 2: "Bob" },
+        }),
+      ]),
+    );
+  });
+
+  it("archives a closed match when the final player leaves", async () => {
+    const createRes = await app.request(
+      "http://localhost/api/matches",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "Solo" }),
+      },
+      env,
+    );
+    const createBody = (await createRes.json()) as { match: { code: string } };
+    const soloCookie = cookieFrom(createRes)!;
+
+    const leaveRes = await app.request(
+      "http://localhost/api/matches/current/leave",
+      {
+        method: "POST",
+        headers: { cookie: soloCookie },
+      },
+      env,
+    );
+    expect(leaveRes.status).toBe(200);
+
+    const adminLoginRes = await app.request(
+      "http://localhost/api/admin/session",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ password: env.ADMIN_PASSWORD }),
+      },
+      env,
+    );
+    const adminCookie = cookieFrom(adminLoginRes)!;
+
+    const dashboardRes = await app.request(
+      "http://localhost/api/admin/dashboard",
+      {
+        headers: { cookie: adminCookie },
+      },
+      env,
+    );
+    const dashboardBody = (await dashboardRes.json()) as {
+      historyMatches: Array<{
+        code: string;
+        status: string;
+        players: { 1: string | null; 2: string | null };
+      }>;
+    };
+
+    expect(dashboardRes.status).toBe(200);
+    expect(dashboardBody.historyMatches).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: createBody.match.code,
+          status: "closed",
+          players: { 1: "Solo", 2: null },
+        }),
+      ]),
+    );
   });
 
   it("creates, joins, scores, and announces a match winner", async () => {

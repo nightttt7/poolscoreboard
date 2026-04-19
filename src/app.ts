@@ -5,6 +5,7 @@ import { Hono } from "hono";
 import { getCookie, setCookie } from "hono/cookie";
 import { createI18n } from "hono-i18n";
 
+import { deleteArchivedMatch, loadAdminDashboard, renderAdminPage, syncArchivedMatch } from "./admin";
 import { clearSession, getAuthenticatedUser, isAdminUser, loginAdmin, upsertSessionUser } from "./auth";
 import { frames, matches, users, type Frame, type Match, type User } from "./db/schema";
 import { MatchRoom, matchRoomConnectUrl, matchRoomNotifyUrl } from "./match-room";
@@ -85,9 +86,32 @@ const messages = {
     adminLoginButton: "Admin 登录",
     adminLoginPending: "正在登录管理员…",
     adminHomeTitle: "Admin 已登录",
-    adminHomeHint: "管理员功能尚在开发中。",
+    adminHomeHint: "查看进行中的比赛和历史归档。",
     adminLogoutButton: "退出 Admin",
     adminLogoutPending: "正在退出管理员…",
+    adminDashboardHint: "查看正在进行的比赛，以及已经结束或关闭的历史对局。",
+    adminRefreshButton: "刷新数据",
+    adminLoadingDashboard: "正在加载管理数据…",
+    adminActiveMatchesTitle: "进行中的比赛",
+    adminActiveMatchesHint: "这里只显示尚未分出胜负的比赛。",
+    adminNoActiveMatches: "当前没有进行中的比赛。",
+    adminHistoryMatchesTitle: "历史对局",
+    adminHistoryMatchesHint: "已获胜、被关闭或过期清理的对局都会保存在这里。",
+    adminNoHistoryMatches: "还没有历史对局。",
+    adminStatusOngoing: "进行中",
+    adminStatusCompleted: "已完成",
+    adminStatusClosed: "已关闭",
+    adminStatusExpired: "已过期",
+    adminMatchCodeValue: "比赛 #{code}",
+    adminPlayersValue: "{player1} vs {player2}",
+    adminTargetWinsLabel: "目标局数",
+    adminScoreLabel: "当前比分",
+    adminStartedAtLabel: "开始时间",
+    adminUpdatedAtLabel: "最近更新",
+    adminArchivedAtLabel: "归档时间",
+    adminFramesTitle: "逐局详情",
+    adminFrameSummary: "第 {frame} 局 · 开球 {breaker} · 胜方 {winner} · 犯规 {fouls1}/{fouls2}",
+    adminNoWinner: "未定",
     lobbyCreateTitle: "开始一场新比赛",
     lobbyCreateHint: "创建后把比赛编号告知另一位玩家即可。",
     yourName: "你的名字",
@@ -129,6 +153,8 @@ const messages = {
     errorNoCurrentMatch: "当前没有进行中的比赛",
     errorAdminBlocked: "管理员账号不能参与比赛",
     errorNeedExitBeforeAdminLogin: "请先退出当前比赛后再使用管理员登录",
+    errorAdminRequired: "请先登录管理员账号",
+    errorAdminForbidden: "当前会话没有管理员权限",
     errorAdminPasswordRequired: "管理员密码必填",
     errorAdminPasswordInvalid: "管理员密码错误",
     errorNameRequired: "名字必填，且不能超过 {max} 个字符",
@@ -180,9 +206,32 @@ const messages = {
     adminLoginButton: "Admin Sign In",
     adminLoginPending: "Signing in as admin…",
     adminHomeTitle: "Admin Signed In",
-    adminHomeHint: "Admin features are still under development.",
+    adminHomeHint: "Review active matches and archived match history.",
     adminLogoutButton: "Sign Out Admin",
     adminLogoutPending: "Signing out admin…",
+    adminDashboardHint: "Review live matches and the archived record of completed or closed sessions.",
+    adminRefreshButton: "Refresh",
+    adminLoadingDashboard: "Loading admin data…",
+    adminActiveMatchesTitle: "Active Matches",
+    adminActiveMatchesHint: "Only matches without a winner stay in this list.",
+    adminNoActiveMatches: "There are no active matches right now.",
+    adminHistoryMatchesTitle: "Match History",
+    adminHistoryMatchesHint: "Completed, closed, and expired sessions are archived here.",
+    adminNoHistoryMatches: "No archived matches yet.",
+    adminStatusOngoing: "Ongoing",
+    adminStatusCompleted: "Completed",
+    adminStatusClosed: "Closed",
+    adminStatusExpired: "Expired",
+    adminMatchCodeValue: "Match #{code}",
+    adminPlayersValue: "{player1} vs {player2}",
+    adminTargetWinsLabel: "Target Frames",
+    adminScoreLabel: "Score",
+    adminStartedAtLabel: "Started",
+    adminUpdatedAtLabel: "Last Updated",
+    adminArchivedAtLabel: "Archived",
+    adminFramesTitle: "Frame Details",
+    adminFrameSummary: "Frame {frame} · Break {breaker} · Winner {winner} · Fouls {fouls1}/{fouls2}",
+    adminNoWinner: "Pending",
     lobbyCreateTitle: "Start a New Match",
     lobbyCreateHint: "Create a match and share the code with the other player.",
     yourName: "Your name",
@@ -224,6 +273,8 @@ const messages = {
     errorNoCurrentMatch: "There is no active match",
     errorAdminBlocked: "Admin accounts cannot join matches",
     errorNeedExitBeforeAdminLogin: "Leave the current match before signing in as admin",
+    errorAdminRequired: "Sign in as admin first",
+    errorAdminForbidden: "This session does not have admin access",
     errorAdminPasswordRequired: "Admin password is required",
     errorAdminPasswordInvalid: "Admin password is incorrect",
     errorNameRequired: "Name is required and must be no longer than {max} characters",
@@ -480,7 +531,7 @@ async function cleanupStaleMatches(c: AppContext) {
   const db = getDatabase(c);
   const cutoff = new Date(Date.now() - MATCH_IDLE_TTL_MS);
   const staleMatches = await db
-    .select({ id: matches.id })
+    .select()
     .from(matches)
     .where(
       or(
@@ -504,6 +555,11 @@ async function cleanupStaleMatches(c: AppContext) {
       updatedAt: now,
     })
     .where(inArray(users.currentMatchId, staleIds));
+
+  for (const match of staleMatches) {
+    const frameRows = await db.select().from(frames).where(eq(frames.matchId, match.id)).orderBy(asc(frames.frameNumber)).all();
+    await syncArchivedMatch(db, match, frameRows, "expired", now);
+  }
 
   await db.delete(frames).where(inArray(frames.matchId, staleIds));
   await db.delete(matches).where(inArray(matches.id, staleIds));
@@ -744,6 +800,30 @@ function serializeUser(user: User | null) {
 
 function adminMatchBlockedResponse(c: AppContext) {
   return c.json({ error: getI18n(c)("errorAdminBlocked") }, 403);
+}
+
+async function ensureAdminSession(c: AppContext) {
+  const t = getI18n(c);
+  const user = await getAuthenticatedUser(c);
+
+  if (!user) {
+    return {
+      user: null,
+      response: c.json({ error: t("errorAdminRequired") }, 401),
+    };
+  }
+
+  if (!isAdminUser(user)) {
+    return {
+      user,
+      response: c.json({ error: t("errorAdminForbidden") }, 403),
+    };
+  }
+
+  return {
+    user,
+    response: null,
+  };
 }
 
 async function respondWithCurrentState(c: AppContext, user: User) {
@@ -2027,7 +2107,10 @@ ${isAdminPage ? `
 
 app.get("/", (c) => c.html(renderHomePage(c, "lobby")));
 
-app.get("/admin", (c) => c.html(renderHomePage(c, "admin")));
+app.get("/admin", (c) => {
+  const locale = resolveLocale(c);
+  return c.html(renderAdminPage({ locale, messages: messages[locale] as MessageDictionary }));
+});
 
 app.get("/health", (c) => c.json({ ok: true, projectName: PROJECT_NAME, workerName: PROJECT_NAME }));
 
@@ -2091,6 +2174,18 @@ app.post("/api/admin/session", async (c) => {
   return c.json({ user: serializeUser(adminUser), match: null });
 });
 
+app.get("/api/admin/dashboard", async (c) => {
+  const admin = await ensureAdminSession(c);
+
+  if (admin.response) {
+    return admin.response;
+  }
+
+  await cleanupStaleMatches(c);
+
+  return c.json(await loadAdminDashboard(c.env.DB));
+});
+
 app.post("/api/matches", async (c) => {
   const t = getI18n(c);
   await cleanupStaleMatches(c);
@@ -2124,6 +2219,7 @@ app.post("/api/matches", async (c) => {
     code,
     targetWins: DEFAULT_TARGET_WINS,
     openingSlot: 1,
+    archiveVersion: 1,
     player1UserId: user.id,
     player1Name: name,
     player2UserId: null,
@@ -2261,6 +2357,19 @@ app.post("/api/matches/current/target-wins", async (c) => {
     })
     .where(eq(matches.id, current.context!.match.id));
 
+  const updatedMatch = await db.select().from(matches).where(eq(matches.id, current.context!.match.id)).get();
+
+  if (updatedMatch) {
+    await normalizeFrames(c, updatedMatch);
+    const frameRows = await db.select().from(frames).where(eq(frames.matchId, updatedMatch.id)).orderBy(asc(frames.frameNumber)).all();
+
+    if (determineWinnerSlot(updatedMatch, frameRows)) {
+      await syncArchivedMatch(db, updatedMatch, frameRows, "completed", now);
+    } else {
+      await deleteArchivedMatch(db, updatedMatch.id, updatedMatch.archiveVersion);
+    }
+  }
+
   notifyMatchRoom(c, current.context!.match.id);
   return respondWithCurrentState(c, current.user!);
 });
@@ -2372,6 +2481,19 @@ app.post("/api/matches/current/frames/:frameNumber/winner", async (c) => {
     })
     .where(eq(matches.id, current.context!.match.id));
 
+  const updatedMatch = await db.select().from(matches).where(eq(matches.id, current.context!.match.id)).get();
+
+  if (updatedMatch) {
+    await normalizeFrames(c, updatedMatch);
+    const frameRows = await db.select().from(frames).where(eq(frames.matchId, updatedMatch.id)).orderBy(asc(frames.frameNumber)).all();
+
+    if (determineWinnerSlot(updatedMatch, frameRows)) {
+      await syncArchivedMatch(db, updatedMatch, frameRows, "completed", now);
+    } else {
+      await deleteArchivedMatch(db, updatedMatch.id, updatedMatch.archiveVersion);
+    }
+  }
+
   notifyMatchRoom(c, current.context!.match.id);
   return respondWithCurrentState(c, current.user!);
 });
@@ -2464,6 +2586,7 @@ app.post("/api/matches/current/reset", async (c) => {
     .update(matches)
     .set({
       targetWins: DEFAULT_TARGET_WINS,
+      archiveVersion: current.context!.match.archiveVersion + 1,
       updatedAt: now,
     })
     .where(eq(matches.id, current.context!.match.id));
@@ -2485,8 +2608,8 @@ app.post("/api/matches/current/leave", async (c) => {
     ? current.context!.match.player2UserId ? 2 : null
     : current.context!.match.player1UserId ? 1 : null;
   const updates = current.context!.slot === 1
-    ? { player1UserId: null, player1Name: null, openingSlot: remainingSlot ?? current.context!.match.openingSlot, updatedAt: now }
-    : { player2UserId: null, player2Name: null, openingSlot: remainingSlot ?? current.context!.match.openingSlot, updatedAt: now };
+    ? { player1UserId: null, openingSlot: remainingSlot ?? current.context!.match.openingSlot, updatedAt: now }
+    : { player2UserId: null, openingSlot: remainingSlot ?? current.context!.match.openingSlot, updatedAt: now };
 
   await db.update(matches).set(updates).where(eq(matches.id, current.context!.match.id));
 
@@ -2518,6 +2641,8 @@ app.post("/api/matches/current/leave", async (c) => {
   const updatedMatch = await db.select().from(matches).where(eq(matches.id, current.context!.match.id)).get();
 
   if (updatedMatch && !updatedMatch.player1UserId && !updatedMatch.player2UserId) {
+    const frameRows = await db.select().from(frames).where(eq(frames.matchId, updatedMatch.id)).orderBy(asc(frames.frameNumber)).all();
+    await syncArchivedMatch(db, updatedMatch, frameRows, "closed", now);
     await db.delete(frames).where(eq(frames.matchId, updatedMatch.id));
     await db.delete(matches).where(eq(matches.id, updatedMatch.id));
   }
