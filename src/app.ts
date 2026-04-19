@@ -130,7 +130,7 @@ const messages = {
     targetWinsSummary: "先胜 {count} 局",
     emptySeat: "空位 {slot}",
     selfTag: "你",
-    totalScoreReadonly: "总比分（只读）",
+    totalScoreLabel: "总比分",
     emptySeatHint: "当前有空位，把比赛编号告诉另一位玩家即可继续。",
     targetWinsCardTitle: "胜利所需局数",
     updateTargetWinsPending: "正在更新目标局数…",
@@ -250,7 +250,7 @@ const messages = {
     targetWinsSummary: "Race to {count}",
     emptySeat: "Open seat {slot}",
     selfTag: "You",
-    totalScoreReadonly: "Total score (read-only)",
+    totalScoreLabel: "Total score",
     emptySeatHint: "There is still an open seat. Share the match code with the other player to continue.",
     targetWinsCardTitle: "Frames Needed to Win",
     updateTargetWinsPending: "Updating target frames…",
@@ -920,7 +920,7 @@ function renderHomePage(c: AppContext, pageMode: "lobby" | "admin" = "lobby") {
       "currentMatchTitle",
       "targetWinsSummary",
       "selfTag",
-      "totalScoreReadonly",
+      "totalScoreLabel",
       "emptySeatHint",
       "targetWinsCardTitle",
       "updateTargetWinsPending",
@@ -1874,7 +1874,9 @@ ${isAdminPage ? `
           if (player.isSelf) {
             nameRow.append(make("span", { className: "self-tag", text: translate("selfTag") }));
           }
-          card.append(nameRow, make("strong", { text: String(match.totalWins[player.slot]) }), make("p", { text: translate("totalScoreReadonly") }));
+          const scoreValue = make("strong", { text: String(match.totalWins[player.slot]) });
+          scoreValue.title = translate("totalScoreLabel");
+          card.append(nameRow, scoreValue);
           scoreGrid.append(card);
         });
         container.append(scoreGrid);

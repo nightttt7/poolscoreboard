@@ -59,9 +59,11 @@ describe("pool scoreboard app", () => {
     expect(html).toContain("创建后把比赛编号告知另一位玩家即可。");
     expect(html).toContain("输入比赛编号");
     expect(html).toContain(String.raw`replace(/\{(\w+)\}/g`);
+    expect(html).toContain('scoreValue.title = translate("totalScoreLabel")');
     expect(html).not.toContain("管理员密码");
     expect(html).not.toContain("前往 Admin 页面");
     expect(html).not.toContain("输入名字即可开始，对手通过比赛编号加入。");
+    expect(html).not.toContain("总比分（只读）");
     expect(html).toContain("grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));");
   });
 
