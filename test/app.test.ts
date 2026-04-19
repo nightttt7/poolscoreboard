@@ -85,8 +85,8 @@ describe("pool scoreboard app", () => {
     expect(res.status).toBe(200);
 
     const html = await res.text();
-    expect(html).toContain("function renderSignedInAdminView() {\n        renderLobby();\n      }");
-    expect(html).not.toContain("if (!matchCode || isAdmin) {");
+    expect(html).toMatch(/function renderSignedInAdminView\(\)\s*\{\s*renderLobby\(\);\s*\}/);
+    expect(html).not.toMatch(/if\s*\(!matchCode\s*\|\|\s*isAdmin\)\s*\{/);
   });
 
   it("renders English when the browser prefers English", async () => {
