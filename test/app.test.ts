@@ -573,6 +573,125 @@ describe("pool scoreboard app", () => {
     expect(secondWinBody.match.winnerMessage).toContain("Alice 2 : Bob 0");
   });
 
+  it("alternates the default breaker slot across frames", async () => {
+    const createRes = await app.request(
+      "http://localhost/api/matches",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "Alice" }),
+      },
+      env,
+    );
+    const cookie = cookieFrom(createRes)!;
+
+    const firstWinRes = await app.request(
+      "http://localhost/api/matches/current/frames/1/winner",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie },
+        body: JSON.stringify({ slot: 1 }),
+      },
+      env,
+    );
+    expect(firstWinRes.status).toBe(200);
+    const firstWinBody = (await firstWinRes.json()) as {
+      match: { frames: Array<{ number: number; breakerSlot: number }> };
+    };
+    expect(firstWinBody.match.frames[1]).toMatchObject({ number: 2, breakerSlot: 2 });
+
+    const secondWinRes = await app.request(
+      "http://localhost/api/matches/current/frames/2/winner",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie },
+        body: JSON.stringify({ slot: 1 }),
+      },
+      env,
+    );
+    expect(secondWinRes.status).toBe(200);
+    const secondWinBody = (await secondWinRes.json()) as {
+      match: { frames: Array<{ number: number; breakerSlot: number }> };
+    };
+    expect(secondWinBody.match.frames[2]).toMatchObject({ number: 3, breakerSlot: 1 });
+  });
+
+  it("continues alternating from a manually changed breaker slot", async () => {
+    const createRes = await app.request(
+      "http://localhost/api/matches",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "Alice" }),
+      },
+      env,
+    );
+    const createBody = (await createRes.json()) as { match: { code: string } };
+    const aliceCookie = cookieFrom(createRes)!;
+
+    const joinRes = await app.request(
+      "http://localhost/api/matches/join",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "Bob", code: createBody.match.code }),
+      },
+      env,
+    );
+    expect(joinRes.status).toBe(200);
+
+    const targetRes = await app.request(
+      "http://localhost/api/matches/current/target-wins",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: aliceCookie },
+        body: JSON.stringify({ value: 4 }),
+      },
+      env,
+    );
+    expect(targetRes.status).toBe(200);
+
+    for (const frameNumber of [1, 2]) {
+      const winRes = await app.request(
+        `http://localhost/api/matches/current/frames/${frameNumber}/winner`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json", cookie: aliceCookie },
+          body: JSON.stringify({ slot: 1 }),
+        },
+        env,
+      );
+      expect(winRes.status).toBe(200);
+    }
+
+    const breakerRes = await app.request(
+      "http://localhost/api/matches/current/frames/3/breaker",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: aliceCookie },
+        body: JSON.stringify({ slot: 2 }),
+      },
+      env,
+    );
+    expect(breakerRes.status).toBe(200);
+
+    const thirdWinRes = await app.request(
+      "http://localhost/api/matches/current/frames/3/winner",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: aliceCookie },
+        body: JSON.stringify({ slot: 1 }),
+      },
+      env,
+    );
+    expect(thirdWinRes.status).toBe(200);
+    const thirdWinBody = (await thirdWinRes.json()) as {
+      match: { frames: Array<{ number: number; breakerSlot: number }> };
+    };
+    expect(thirdWinBody.match.frames[2]).toMatchObject({ number: 3, breakerSlot: 2 });
+    expect(thirdWinBody.match.frames[3]).toMatchObject({ number: 4, breakerSlot: 1 });
+  });
+
   it("handles duplicate foul and winner submissions without side effects", async () => {
     const createRes = await app.request(
       "http://localhost/api/matches",
