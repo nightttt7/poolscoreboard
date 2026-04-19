@@ -278,19 +278,22 @@ export function renderAdminPage(options: {
     <title>${messages.adminTitle}</title>
     <style>
       :root {
-        --bg: #f4ede3;
-        --surface: rgba(255, 251, 246, 0.9);
-        --surface-strong: #fff8f0;
-        --line: rgba(82, 49, 19, 0.16);
-        --ink: #2d1b0f;
-        --muted: #725743;
-        --accent: #b4471b;
-        --accent-strong: #7b2608;
-        --accent-soft: rgba(180, 71, 27, 0.12);
-        --success: #2b6b3f;
-        --warning: #915b00;
-        --shadow: 0 24px 80px rgba(85, 46, 18, 0.12);
-        font-family: Georgia, "Times New Roman", serif;
+        --bg: #0f172a;
+        --panel: rgba(15, 23, 42, 0.88);
+        --panel-strong: #111827;
+        --card: rgba(30, 41, 59, 0.95);
+        --line: rgba(148, 163, 184, 0.22);
+        --text: #f8fafc;
+        --muted: #94a3b8;
+        --accent: #22c55e;
+        --accent-strong: #16a34a;
+        --accent-soft: rgba(34, 197, 94, 0.18);
+        --success: #22c55e;
+        --warning: #f59e0b;
+        --danger: #ef4444;
+        --button: #334155;
+        --button-strong: #475569;
+        font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       }
 
       * { box-sizing: border-box; }
@@ -298,20 +301,8 @@ export function renderAdminPage(options: {
       body {
         margin: 0;
         min-height: 100vh;
-        color: var(--ink);
-        background:
-          radial-gradient(circle at top left, rgba(255, 255, 255, 0.75), transparent 34%),
-          linear-gradient(180deg, #efe4d6 0%, #f8f2ea 48%, #ede2d3 100%);
-      }
-
-      body::before {
-        content: "";
-        position: fixed;
-        inset: 0;
-        pointer-events: none;
-        background-image: linear-gradient(rgba(61, 38, 20, 0.03) 1px, transparent 1px), linear-gradient(90deg, rgba(61, 38, 20, 0.03) 1px, transparent 1px);
-        background-size: 18px 18px;
-        mask-image: radial-gradient(circle at center, black 55%, transparent 92%);
+        color: var(--text);
+        background: radial-gradient(circle at top, #1e293b, var(--bg) 48%);
       }
 
       .page {
@@ -327,9 +318,9 @@ export function renderAdminPage(options: {
         gap: 18px;
         padding: 24px;
         border: 1px solid var(--line);
-        border-radius: 28px;
-        background: linear-gradient(135deg, rgba(255, 248, 240, 0.95), rgba(248, 239, 228, 0.88));
-        box-shadow: var(--shadow);
+        border-radius: 24px;
+        background: var(--panel);
+        box-shadow: 0 24px 60px rgba(15, 23, 42, 0.45);
       }
 
       .hero-top,
@@ -350,7 +341,7 @@ export function renderAdminPage(options: {
         letter-spacing: 0.18em;
         text-transform: uppercase;
         font-size: 12px;
-        color: var(--accent-strong);
+        color: var(--accent);
       }
 
       h1,
@@ -360,9 +351,9 @@ export function renderAdminPage(options: {
         margin: 0;
       }
 
-      h1 { font-size: clamp(32px, 8vw, 60px); line-height: 0.95; }
-      h2 { font-size: 22px; }
-      h3 { font-size: 18px; }
+      h1 { font-size: clamp(28px, 7vw, 52px); line-height: 1.05; }
+      h2 { font-size: 1.1rem; }
+      h3 { font-size: 1rem; }
 
       .hero-copy {
         display: grid;
@@ -385,10 +376,10 @@ export function renderAdminPage(options: {
         display: inline-flex;
         align-items: center;
         gap: 8px;
-        padding: 8px 12px;
+        padding: 6px 12px;
         border-radius: 999px;
         border: 1px solid var(--line);
-        background: rgba(255, 255, 255, 0.62);
+        background: rgba(148, 163, 184, 0.08);
         font-size: 13px;
       }
 
@@ -407,10 +398,9 @@ export function renderAdminPage(options: {
       .panel,
       .match-card {
         border: 1px solid var(--line);
-        border-radius: 24px;
-        background: var(--surface);
-        box-shadow: 0 18px 48px rgba(94, 53, 25, 0.1);
-        backdrop-filter: blur(14px);
+        border-radius: 20px;
+        background: var(--panel);
+        box-shadow: 0 24px 60px rgba(15, 23, 42, 0.45);
       }
 
       .panel {
@@ -439,16 +429,16 @@ export function renderAdminPage(options: {
       .summary-item {
         min-width: 140px;
         padding: 12px 14px;
-        border-radius: 18px;
-        background: var(--surface-strong);
-        border: 1px solid rgba(123, 38, 8, 0.08);
+        border-radius: 16px;
+        background: var(--panel-strong);
+        border: 1px solid var(--line);
       }
 
       .summary-item strong,
       .meta-value {
         display: block;
         margin-top: 6px;
-        color: var(--ink);
+        color: var(--text);
       }
 
       .frame-list {
@@ -469,40 +459,40 @@ export function renderAdminPage(options: {
 
       input {
         width: 100%;
-        border: 1px solid rgba(77, 46, 20, 0.18);
+        border: 1px solid var(--line);
         border-radius: 16px;
         padding: 14px 16px;
         font: inherit;
-        color: var(--ink);
-        background: rgba(255, 255, 255, 0.72);
+        color: var(--text);
+        background: rgba(15, 23, 42, 0.9);
       }
+
+      input::placeholder { color: var(--muted); }
 
       button {
         border: 0;
-        border-radius: 999px;
+        border-radius: 16px;
         padding: 12px 18px;
         font: inherit;
         font-weight: 700;
         cursor: pointer;
-        color: #fff9f2;
-        background: linear-gradient(135deg, var(--accent), var(--accent-strong));
-        box-shadow: 0 14px 32px rgba(123, 38, 8, 0.24);
+        color: #052e16;
+        background: var(--accent);
       }
 
       button.secondary {
-        color: var(--ink);
-        background: rgba(255, 255, 255, 0.72);
-        box-shadow: none;
+        color: var(--text);
+        background: var(--button);
         border: 1px solid var(--line);
       }
 
       button:disabled {
         cursor: wait;
-        opacity: 0.65;
+        opacity: 0.7;
       }
 
       details {
-        border-top: 1px solid rgba(77, 46, 20, 0.12);
+        border-top: 1px solid var(--line);
         padding-top: 12px;
       }
 
@@ -514,13 +504,16 @@ export function renderAdminPage(options: {
       .tag.completed { color: var(--success); }
       .tag.closed,
       .tag.expired { color: var(--warning); }
-      .tag.ongoing { color: var(--accent-strong); }
+      .tag.ongoing { color: var(--accent); }
+
+      .status-pill.completed { color: var(--success); }
+      .status-pill.closed { color: var(--danger); }
 
       .empty-state {
         padding: 18px;
-        border-radius: 18px;
-        background: rgba(255, 255, 255, 0.58);
-        border: 1px dashed rgba(77, 46, 20, 0.16);
+        border-radius: 16px;
+        background: rgba(148, 163, 184, 0.06);
+        border: 1px dashed var(--line);
       }
 
       @media (max-width: 720px) {
@@ -532,7 +525,7 @@ export function renderAdminPage(options: {
         .hero,
         .panel,
         .match-card {
-          border-radius: 22px;
+          border-radius: 18px;
         }
 
         .button-row button,
@@ -559,7 +552,7 @@ export function renderAdminPage(options: {
           </div>
         </div>
         <div class="hero-actions">
-          <span id="status" class="status-pill">${messages.statusConnecting}</span>
+          <span id="status" class="status-pill">${messages.adminLoadingDashboard}</span>
           <div class="button-row" id="hero-actions"></div>
         </div>
       </section>
