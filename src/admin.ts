@@ -292,7 +292,7 @@ async function seedMockHistoryIfEmpty(db: Database) {
     return;
   }
 
-  const baseTime = Date.now() - 1000 * 60 * 60 * 24 * 3;
+  const now = Date.now();
   const samples: Array<{
     code: string;
     status: ArchivedMatchStatus;
@@ -342,7 +342,7 @@ async function seedMockHistoryIfEmpty(db: Database) {
   ];
 
   for (const sample of samples) {
-    const archivedAt = new Date(baseTime + (3 - sample.minutesAgo / (60 * 24)) * 1000);
+    const archivedAt = new Date(now - sample.minutesAgo * 60 * 1000);
     const createdAt = new Date(archivedAt.getTime() - 1000 * 60 * 30);
     const updatedAt = archivedAt;
     const matchId = "mock-" + sample.code;
