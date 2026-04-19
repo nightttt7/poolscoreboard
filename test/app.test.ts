@@ -79,6 +79,16 @@ describe("pool scoreboard app", () => {
     expect(html).toContain("返回首页");
   });
 
+  it("keeps the homepage scoreboard flow available for signed-in admin sessions", async () => {
+    const res = await app.request("http://localhost/", undefined, env);
+
+    expect(res.status).toBe(200);
+
+    const html = await res.text();
+    expect(html).toContain("function renderSignedInAdminView() {\n        renderLobby();\n      }");
+    expect(html).not.toContain("if (!matchCode || isAdmin) {");
+  });
+
   it("renders English when the browser prefers English", async () => {
     const res = await app.request(
       "http://localhost/",

@@ -1297,7 +1297,7 @@ function renderHomePage(c: AppContext, pageMode: "lobby" | "admin" = "lobby") {
           return state.user && state.user.isAdmin ? translate("statusAdminLoggedIn") : translate("statusAdminLoginPrompt");
         }
 
-        return state.user && state.user.isAdmin ? translate("statusAdminUsePortal") : translate("statusLobbyReady");
+        return state.user && state.user.isAdmin ? translate("statusAdminLoggedIn") : translate("statusLobbyReady");
       }
 
       function resetMatchInteractionState() {
@@ -1884,7 +1884,7 @@ ${isAdminPage ? `
       }
 
       function renderSignedInAdminView() {
-        renderAdminPortal();
+        renderLobby();
       }
 `}
 
@@ -2118,9 +2118,7 @@ ${isAdminPage ? `
 
       function syncRealtime() {
         const matchCode = state.match ? state.match.code : null;
-        const isAdmin = state.user && state.user.isAdmin;
-
-        if (!matchCode || isAdmin) {
+        if (!matchCode) {
           closeRealtime();
           return;
         }
