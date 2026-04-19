@@ -167,7 +167,20 @@ describe("pool scoreboard app", () => {
     expect(res.status).toBe(401);
   });
 
-  it("keeps a separate admin login entry and blocks admin from joining matches", async () => {
+  it("keeps a separate admin login entry and allows admin to join matches", async () => {
+    const createRes = await app.request(
+      "http://localhost/api/matches",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "Alice" }),
+      },
+      env,
+    );
+
+    expect(createRes.status).toBe(201);
+    const createBody = (await createRes.json()) as { match: { code: string } };
+
     const loginRes = await app.request(
       "http://localhost/api/admin/session",
       {
@@ -187,21 +200,45 @@ describe("pool scoreboard app", () => {
       match: null,
     });
 
-    const createRes = await app.request(
-      "http://localhost/api/matches",
+    const joinRes = await app.request(
+      "http://localhost/api/matches/join",
       {
         method: "POST",
         headers: {
           "content-type": "application/json",
           cookie: adminCookie!,
         },
-        body: JSON.stringify({ name: "Alice" }),
+        body: JSON.stringify({ name: "Admin Player", code: createBody.match.code }),
       },
       env,
     );
 
-    expect(createRes.status).toBe(403);
-    await expect(createRes.json()).resolves.toEqual({ error: "管理员账号不能参与比赛" });
+    expect(joinRes.status).toBe(200);
+    const joinBody = (await joinRes.json()) as {
+      user: { name: string; isAdmin: boolean };
+      match: { code: string; targetWins: number; players: Array<{ name: string }> };
+    };
+    expect(joinBody.user).toEqual({ name: "Admin Player", isAdmin: true });
+    expect(joinBody.match.code).toBe(createBody.match.code);
+    expect(joinBody.match.targetWins).toBe(7);
+    expect(joinBody.match.players.map((player) => player.name)).toEqual(["Alice", "Admin Player"]);
+
+    const updateRes = await app.request(
+      "http://localhost/api/matches/current/target-wins",
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          cookie: adminCookie!,
+        },
+        body: JSON.stringify({ value: 9 }),
+      },
+      env,
+    );
+
+    expect(updateRes.status).toBe(200);
+    const updateBody = (await updateRes.json()) as { match: { targetWins: number } };
+    expect(updateBody.match.targetWins).toBe(9);
   });
 
   it("requires an authenticated admin session before reading the admin dashboard", async () => {

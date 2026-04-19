@@ -171,7 +171,6 @@ const messages = {
     websocketExpected: "expected websocket",
     errorNeedNameAndMatch: "需要先填写名字并进入比赛",
     errorNoCurrentMatch: "当前没有进行中的比赛",
-    errorAdminBlocked: "管理员账号不能参与比赛",
     errorNeedExitBeforeAdminLogin: "请先退出当前比赛后再使用管理员登录",
     errorAdminRequired: "请先登录管理员账号",
     errorAdminForbidden: "当前会话没有管理员权限",
@@ -311,7 +310,6 @@ const messages = {
     websocketExpected: "expected websocket",
     errorNeedNameAndMatch: "Enter your name and join a match first",
     errorNoCurrentMatch: "There is no active match",
-    errorAdminBlocked: "Admin accounts cannot join matches",
     errorNeedExitBeforeAdminLogin: "Leave the current match before signing in as admin",
     errorAdminRequired: "Sign in as admin first",
     errorAdminForbidden: "This session does not have admin access",
@@ -774,14 +772,6 @@ async function ensureCurrentMatch(c: AppContext) {
     };
   }
 
-  if (isAdminUser(user)) {
-    return {
-      user,
-      context: null,
-      response: adminMatchBlockedResponse(c),
-    };
-  }
-
   const context = await loadCurrentMatchContext(c, user);
 
   if (!context) {
@@ -838,10 +828,6 @@ function serializeUser(user: User | null) {
       isAdmin: isAdminUser(user),
     }
     : null;
-}
-
-function adminMatchBlockedResponse(c: AppContext) {
-  return c.json({ error: getI18n(c)("errorAdminBlocked") }, 403);
 }
 
 async function ensureAdminSession(c: AppContext) {
@@ -2298,12 +2284,6 @@ app.post("/api/matches", async (c) => {
     return c.json({ error: t("errorNameRequired", { max: String(MAX_NAME_LENGTH) }) }, 400);
   }
 
-  const currentUser = await getAuthenticatedUser(c);
-
-  if (isAdminUser(currentUser)) {
-    return adminMatchBlockedResponse(c);
-  }
-
   const user = await upsertSessionUser(c, name);
   const existingContext = await loadCurrentMatchContext(c, user);
 
@@ -2367,12 +2347,6 @@ app.post("/api/matches/join", async (c) => {
 
   if (!code) {
     return c.json({ error: t("errorMatchCodeInvalid") }, 400);
-  }
-
-  const currentUser = await getAuthenticatedUser(c);
-
-  if (isAdminUser(currentUser)) {
-    return adminMatchBlockedResponse(c);
   }
 
   const user = await upsertSessionUser(c, name);
@@ -2768,10 +2742,6 @@ app.get("/api/matches/current/socket", async (c) => {
 
   if (!user) {
     return c.json({ error: t("errorNeedNameAndMatch") }, 401);
-  }
-
-  if (isAdminUser(user)) {
-    return adminMatchBlockedResponse(c);
   }
 
   const context = await loadCurrentMatchContext(c, user);
