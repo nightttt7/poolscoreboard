@@ -691,7 +691,7 @@ async function loadMatchState(c: AppContext, matchId: string, currentUserId: num
       player2Fouls: frame.player2Fouls,
       startAt: frame.createdAt.toISOString(),
       endAt: frame.winnerSlot === 1 || frame.winnerSlot === 2
-        ? (frame.endedAt ?? frame.updatedAt).toISOString()
+        ? frame.endedAt?.toISOString() ?? null
         : null,
     })),
     totalWins,
@@ -1385,6 +1385,7 @@ function renderHomePage(c: AppContext, pageMode: "lobby" | "admin" = "lobby") {
         }
 
         return new Intl.DateTimeFormat(locale, {
+          year: "numeric",
           month: "2-digit",
           day: "2-digit",
           hour: "2-digit",
