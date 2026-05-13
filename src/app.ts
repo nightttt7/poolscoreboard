@@ -632,6 +632,7 @@ async function normalizeFrames(c: AppContext, match: Match, timestamp = new Date
   const lastFrame = working[working.length - 1]!;
 
   if (lastFrame.winnerSlot != null) {
+    const nextFrameStartedAt = lastFrame.endedAt ?? timestamp;
     await db.insert(frames).values({
       matchId: match.id,
       frameNumber: lastFrame.frameNumber + 1,
@@ -640,8 +641,8 @@ async function normalizeFrames(c: AppContext, match: Match, timestamp = new Date
       player1Fouls: 0,
       player2Fouls: 0,
       endedAt: null,
-      createdAt: timestamp,
-      updatedAt: timestamp,
+      createdAt: nextFrameStartedAt,
+      updatedAt: nextFrameStartedAt,
     });
   }
 }
@@ -687,17 +688,19 @@ async function loadMatchState(c: AppContext, matchId: string, currentUserId: num
         isSelf: match.player2UserId === currentUserId,
       },
     ],
-    frames: frameRows.map((frame, index) => ({
-      number: frame.frameNumber,
-      breakerSlot: breakerSlots[index]!,
-      winnerSlot: frame.winnerSlot === 1 || frame.winnerSlot === 2 ? frame.winnerSlot : null,
-      player1Fouls: frame.player1Fouls,
-      player2Fouls: frame.player2Fouls,
-      startAt: frame.createdAt.toISOString(),
-      endAt: frame.winnerSlot === 1 || frame.winnerSlot === 2
-        ? serializeFrameEndAt(frame)
-        : null,
-    })),
+    frames: frameRows.map((frame, index) => {
+      const frameWinnerSlot = frame.winnerSlot === 1 || frame.winnerSlot === 2 ? frame.winnerSlot : null;
+
+      return {
+        number: frame.frameNumber,
+        breakerSlot: breakerSlots[index]!,
+        winnerSlot: frameWinnerSlot,
+        player1Fouls: frame.player1Fouls,
+        player2Fouls: frame.player2Fouls,
+        startAt: frame.createdAt.toISOString(),
+        endAt: frameWinnerSlot ? serializeFrameEndAt(frame) : null,
+      };
+    }),
     totalWins,
     winnerSlot,
     winnerMessage,
@@ -1265,7 +1268,8 @@ function renderHomePage(c: AppContext, pageMode: "lobby" | "admin" = "lobby") {
         day: "2-digit",
         hour: "2-digit",
         minute: "2-digit",
-        second: "2-digit"
+        second: "2-digit",
+        timeZoneName: "short"
       });
       const state = {
         user: null,
