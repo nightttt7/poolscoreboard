@@ -533,6 +533,10 @@ function determineWinnerSlot(match: Match, frameRows: Frame[]) {
   return null;
 }
 
+function serializeFrameEndAt(frame: Frame) {
+  return frame.endedAt ? frame.endedAt.toISOString() : null;
+}
+
 async function readJson<T>(c: AppContext) {
   try {
     return await c.req.json<T>();
@@ -691,7 +695,7 @@ async function loadMatchState(c: AppContext, matchId: string, currentUserId: num
       player2Fouls: frame.player2Fouls,
       startAt: frame.createdAt.toISOString(),
       endAt: frame.winnerSlot === 1 || frame.winnerSlot === 2
-        ? frame.endedAt?.toISOString() ?? null
+        ? serializeFrameEndAt(frame)
         : null,
     })),
     totalWins,
@@ -1255,6 +1259,14 @@ function renderHomePage(c: AppContext, pageMode: "lobby" | "admin" = "lobby") {
       const shell = document.getElementById("app-shell");
       const statusNode = document.getElementById("status");
       const localeButtons = Array.from(document.querySelectorAll("[data-locale]"));
+      const frameTimeFormatter = new Intl.DateTimeFormat(locale, {
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit"
+      });
       const state = {
         user: null,
         match: null,
@@ -1384,14 +1396,7 @@ function renderHomePage(c: AppContext, pageMode: "lobby" | "admin" = "lobby") {
           return translate("frameEndPending");
         }
 
-        return new Intl.DateTimeFormat(locale, {
-          year: "numeric",
-          month: "2-digit",
-          day: "2-digit",
-          hour: "2-digit",
-          minute: "2-digit",
-          second: "2-digit"
-        }).format(new Date(value));
+        return frameTimeFormatter.format(new Date(value));
       }
 
       function goTo(path) {
