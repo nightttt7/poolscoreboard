@@ -37,6 +37,8 @@ type MatchState = {
     winnerSlot: PlayerSlot | null;
     player1Fouls: number;
     player2Fouls: number;
+    startAt: string;
+    endAt: string | null;
   }>;
   totalWins: {
     1: number;
@@ -155,6 +157,9 @@ const messages = {
     targetWinsCardTitle: "胜利所需局数",
     updateTargetWinsPending: "正在更新目标局数…",
     frameTitle: "第 {frameNumber} 局",
+    frameStartLabel: "开始: {time}",
+    frameEndLabel: "结束: {time}",
+    frameEndPending: "进行中",
     breakerLabel: "开球方: {name}",
     changeBreakerButton: "更换发球方",
     changeBreakerPending: "正在更换开球方…",
@@ -294,6 +299,9 @@ const messages = {
     targetWinsCardTitle: "Frames Needed to Win",
     updateTargetWinsPending: "Updating target frames…",
     frameTitle: "Frame {frameNumber}",
+    frameStartLabel: "Start: {time}",
+    frameEndLabel: "End: {time}",
+    frameEndPending: "In progress",
     breakerLabel: "Break by: {name}",
     changeBreakerButton: "Change breaker",
     changeBreakerPending: "Changing breaker…",
@@ -584,6 +592,7 @@ async function normalizeFrames(c: AppContext, match: Match) {
       winnerSlot: null,
       player1Fouls: 0,
       player2Fouls: 0,
+      endedAt: null,
       createdAt: now,
       updatedAt: now,
     });
@@ -628,6 +637,7 @@ async function normalizeFrames(c: AppContext, match: Match) {
       winnerSlot: null,
       player1Fouls: 0,
       player2Fouls: 0,
+      endedAt: null,
       createdAt: now,
       updatedAt: now,
     });
@@ -681,6 +691,10 @@ async function loadMatchState(c: AppContext, matchId: string, currentUserId: num
       winnerSlot: frame.winnerSlot === 1 || frame.winnerSlot === 2 ? frame.winnerSlot : null,
       player1Fouls: frame.player1Fouls,
       player2Fouls: frame.player2Fouls,
+      startAt: frame.createdAt.toISOString(),
+      endAt: frame.winnerSlot === 1 || frame.winnerSlot === 2
+        ? (frame.endedAt ?? frame.updatedAt).toISOString()
+        : null,
     })),
     totalWins,
     winnerSlot,
@@ -919,6 +933,9 @@ function renderHomePage(c: AppContext, pageMode: "lobby" | "admin" = "lobby") {
       "targetWinsCardTitle",
       "updateTargetWinsPending",
       "frameTitle",
+      "frameStartLabel",
+      "frameEndLabel",
+      "frameEndPending",
       "breakerLabel",
       "changeBreakerButton",
       "changeBreakerPending",
@@ -1141,6 +1158,13 @@ function renderHomePage(c: AppContext, pageMode: "lobby" | "admin" = "lobby") {
         align-items: center;
         gap: 12px;
       }
+      .frame-times {
+        display: flex;
+        gap: 8px 14px;
+        flex-wrap: wrap;
+        color: var(--muted);
+        font-size: 0.86rem;
+      }
       .breaker-row {
         display: flex;
         justify-content: space-between;
@@ -1355,6 +1379,20 @@ function renderHomePage(c: AppContext, pageMode: "lobby" | "admin" = "lobby") {
 
       function seatLabel(player) {
         return player.name || translate("emptySeat", { slot: player.slot });
+      }
+
+      function formatFrameTime(value) {
+        if (!value) {
+          return translate("frameEndPending");
+        }
+
+        return new Intl.DateTimeFormat(locale, {
+          month: "2-digit",
+          day: "2-digit",
+          hour: "2-digit",
+          minute: "2-digit",
+          second: "2-digit"
+        }).format(new Date(value));
       }
 
       function goTo(path) {
@@ -1924,6 +1962,13 @@ ${isAdminPage ? `
           }
           frameCard.append(frameHead);
 
+          const frameTimes = make("div", { className: "frame-times" });
+          frameTimes.append(
+            make("span", { text: translate("frameStartLabel", { time: formatFrameTime(frame.startAt) }) }),
+            make("span", { text: translate("frameEndLabel", { time: formatFrameTime(frame.endAt) }) })
+          );
+          frameCard.append(frameTimes);
+
           const breakerRow = make("div", { className: "breaker-row" });
           breakerRow.append(make("p", { text: translate("breakerLabel", { name: playerLabel(breakerPlayer) }) }));
           const breakerButton = make("button", { className: "ghost clear-button", text: translate("changeBreakerButton") });
@@ -2281,6 +2326,7 @@ app.post("/api/matches", async (c) => {
     winnerSlot: null,
     player1Fouls: 0,
     player2Fouls: 0,
+    endedAt: null,
     createdAt: now,
     updatedAt: now,
   });
@@ -2506,6 +2552,7 @@ app.post("/api/matches/current/frames/:frameNumber/winner", async (c) => {
     .update(frames)
     .set({
       winnerSlot: slot,
+      endedAt: slot === null ? null : now,
       updatedAt: now,
     })
     .where(eq(frames.id, frame.id));
@@ -2615,6 +2662,7 @@ app.post("/api/matches/current/reset", async (c) => {
     winnerSlot: null,
     player1Fouls: 0,
     player2Fouls: 0,
+    endedAt: null,
     createdAt: now,
     updatedAt: now,
   });

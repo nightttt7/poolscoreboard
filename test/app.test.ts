@@ -28,7 +28,7 @@ async function resetDatabase() {
     "CREATE TABLE matches (id TEXT PRIMARY KEY NOT NULL, code TEXT NOT NULL UNIQUE, target_wins INTEGER NOT NULL DEFAULT 7, opening_slot INTEGER NOT NULL DEFAULT 1, archive_version INTEGER NOT NULL DEFAULT 1, player1_user_id INTEGER, player1_name TEXT, player2_user_id INTEGER, player2_name TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)"
   );
   await env.DB.exec(
-    "CREATE TABLE frames (id INTEGER PRIMARY KEY AUTOINCREMENT, match_id TEXT NOT NULL, frame_number INTEGER NOT NULL, breaker_slot INTEGER, winner_slot INTEGER, player1_fouls INTEGER NOT NULL DEFAULT 0, player2_fouls INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, FOREIGN KEY (match_id) REFERENCES matches(id))"
+    "CREATE TABLE frames (id INTEGER PRIMARY KEY AUTOINCREMENT, match_id TEXT NOT NULL, frame_number INTEGER NOT NULL, breaker_slot INTEGER, winner_slot INTEGER, player1_fouls INTEGER NOT NULL DEFAULT 0, player2_fouls INTEGER NOT NULL DEFAULT 0, ended_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, FOREIGN KEY (match_id) REFERENCES matches(id))"
   );
   await env.DB.exec(
     "CREATE TABLE match_history (id INTEGER PRIMARY KEY AUTOINCREMENT, match_id TEXT NOT NULL, archive_version INTEGER NOT NULL, code TEXT NOT NULL, status TEXT NOT NULL, winner_slot INTEGER, target_wins INTEGER NOT NULL, player1_name TEXT, player2_name TEXT, player1_wins INTEGER NOT NULL, player2_wins INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, archived_at INTEGER NOT NULL, snapshot TEXT NOT NULL)"

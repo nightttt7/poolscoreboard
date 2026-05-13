@@ -41,6 +41,7 @@ export const frames = sqliteTable("frames", {
   winnerSlot: integer("winner_slot"),
   player1Fouls: integer("player1_fouls").notNull().default(0),
   player2Fouls: integer("player2_fouls").notNull().default(0),
+  endedAt: integer("ended_at", { mode: "timestamp_ms" }),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
   updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
 });
