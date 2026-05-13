@@ -58,6 +58,8 @@ describe("pool scoreboard app", () => {
     expect(html).toContain("开启新比赛");
     expect(html).toContain("创建后把比赛编号告知另一位玩家即可。");
     expect(html).toContain("输入比赛编号");
+    expect(html).toContain("开始: {time}");
+    expect(html).toContain("结束: {time}");
     expect(html).toContain(String.raw`replace(/\{(\w+)\}/g`);
     expect(html).toContain('scoreValue.title = translate("totalScoreLabel")');
     expect(html).not.toContain("管理员密码");
@@ -447,12 +449,19 @@ describe("pool scoreboard app", () => {
     );
 
     expect(createRes.status).toBe(201);
-    const createBody = (await createRes.json()) as { match: { code: string; frames: Array<{ number: number; breakerSlot: number }> } };
+    const createBody = (await createRes.json()) as {
+      match: {
+        code: string;
+        frames: Array<{ number: number; breakerSlot: number; startAt: string; endAt: string | null }>;
+      };
+    };
     const aliceCookie = cookieFrom(createRes);
     expect(aliceCookie).toBeTruthy();
     expect(createBody.match.code).toMatch(/^\d{2,}$/);
     expect(createBody.match.frames).toHaveLength(1);
     expect(createBody.match.frames[0]).toMatchObject({ number: 1, breakerSlot: 1 });
+    expect(Date.parse(createBody.match.frames[0]!.startAt)).not.toBeNaN();
+    expect(createBody.match.frames[0]!.endAt).toBeNull();
 
     const joinRes = await app.request(
       "http://localhost/api/matches/join",
@@ -531,7 +540,14 @@ describe("pool scoreboard app", () => {
     );
     const firstWinBody = (await firstWinRes.json()) as {
       match: {
-        frames: Array<{ number: number; breakerSlot: number; winnerSlot: number | null; player2Fouls: number }>;
+        frames: Array<{
+          number: number;
+          breakerSlot: number;
+          winnerSlot: number | null;
+          player2Fouls: number;
+          startAt: string;
+          endAt: string | null;
+        }>;
         totalWins: { 1: number; 2: number };
         winnerMessage: string | null;
       };
@@ -542,6 +558,9 @@ describe("pool scoreboard app", () => {
     expect(firstWinBody.match.frames).toHaveLength(2);
     expect(firstWinBody.match.frames[0]).toMatchObject({ number: 1, breakerSlot: 2, winnerSlot: 1, player2Fouls: 2 });
     expect(firstWinBody.match.frames[1]).toMatchObject({ number: 2, breakerSlot: 1, winnerSlot: null });
+    expect(Date.parse(firstWinBody.match.frames[0]!.endAt!)).not.toBeNaN();
+    expect(firstWinBody.match.frames[1]!.startAt).toBe(firstWinBody.match.frames[0]!.endAt);
+    expect(firstWinBody.match.frames[1]!.endAt).toBeNull();
     expect(firstWinBody.match.winnerMessage).toBeNull();
 
     const secondWinRes = await app.request(

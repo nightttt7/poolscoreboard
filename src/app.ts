@@ -579,12 +579,11 @@ async function cleanupStaleMatches(c: AppContext) {
   await db.delete(matches).where(inArray(matches.id, staleIds));
 }
 
-async function normalizeFrames(c: AppContext, match: Match) {
+async function normalizeFrames(c: AppContext, match: Match, timestamp = new Date()) {
   const db = getDatabase(c);
   const frameRows = await db.select().from(frames).where(eq(frames.matchId, match.id)).orderBy(asc(frames.frameNumber)).all();
 
   if (frameRows.length === 0) {
-    const now = new Date();
     await db.insert(frames).values({
       matchId: match.id,
       frameNumber: 1,
@@ -593,8 +592,8 @@ async function normalizeFrames(c: AppContext, match: Match) {
       player1Fouls: 0,
       player2Fouls: 0,
       endedAt: null,
-      createdAt: now,
-      updatedAt: now,
+      createdAt: timestamp,
+      updatedAt: timestamp,
     });
     return;
   }
@@ -629,7 +628,6 @@ async function normalizeFrames(c: AppContext, match: Match) {
   const lastFrame = working[working.length - 1]!;
 
   if (lastFrame.winnerSlot != null) {
-    const now = new Date();
     await db.insert(frames).values({
       matchId: match.id,
       frameNumber: lastFrame.frameNumber + 1,
@@ -638,8 +636,8 @@ async function normalizeFrames(c: AppContext, match: Match) {
       player1Fouls: 0,
       player2Fouls: 0,
       endedAt: null,
-      createdAt: now,
-      updatedAt: now,
+      createdAt: timestamp,
+      updatedAt: timestamp,
     });
   }
 }
@@ -2446,7 +2444,7 @@ app.post("/api/matches/current/target-wins", async (c) => {
   const updatedMatch = await db.select().from(matches).where(eq(matches.id, current.context!.match.id)).get();
 
   if (updatedMatch) {
-    await normalizeFrames(c, updatedMatch);
+    await normalizeFrames(c, updatedMatch, now);
     const frameRows = await db.select().from(frames).where(eq(frames.matchId, updatedMatch.id)).orderBy(asc(frames.frameNumber)).all();
 
     if (determineWinnerSlot(updatedMatch, frameRows)) {
@@ -2567,7 +2565,7 @@ app.post("/api/matches/current/frames/:frameNumber/winner", async (c) => {
   const updatedMatch = await db.select().from(matches).where(eq(matches.id, current.context!.match.id)).get();
 
   if (updatedMatch) {
-    await normalizeFrames(c, updatedMatch);
+    await normalizeFrames(c, updatedMatch, now);
     const frameRows = await db.select().from(frames).where(eq(frames.matchId, updatedMatch.id)).orderBy(asc(frames.frameNumber)).all();
 
     if (determineWinnerSlot(updatedMatch, frameRows)) {
