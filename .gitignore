@@ -1,0 +1,11 @@
+node_modules/
+.wrangler/
+dist/
+coverage/
+*.tsbuildinfo
+data/logs/
+.env
+.env.*
+.dev.vars
+.dev.vars.*
+TEMP-PLAN.md
