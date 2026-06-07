@@ -1,4 +1,4 @@
-CREATE TABLE `users` (
+CREATE TABLE IF NOT EXISTS `users` (
   `id` integer PRIMARY KEY AUTOINCREMENT NOT NULL,
   `name` text NOT NULL,
   `current_match_id` text,
@@ -9,9 +9,9 @@ CREATE TABLE `users` (
   `updated_at` integer NOT NULL
 );
 
-CREATE UNIQUE INDEX `users_username_unique` ON `users` (`username`);
+CREATE UNIQUE INDEX IF NOT EXISTS `users_username_unique` ON `users` (`username`);
 
-CREATE TABLE `sessions` (
+CREATE TABLE IF NOT EXISTS `sessions` (
   `id` text PRIMARY KEY NOT NULL,
   `user_id` integer NOT NULL,
   `token_hash` text NOT NULL,
@@ -20,9 +20,9 @@ CREATE TABLE `sessions` (
   FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action
 );
 
-CREATE UNIQUE INDEX `sessions_token_hash_unique` ON `sessions` (`token_hash`);
+CREATE UNIQUE INDEX IF NOT EXISTS `sessions_token_hash_unique` ON `sessions` (`token_hash`);
 
-CREATE TABLE `matches` (
+CREATE TABLE IF NOT EXISTS `matches` (
   `id` text PRIMARY KEY NOT NULL,
   `code` text NOT NULL,
   `target_wins` integer NOT NULL DEFAULT 7,
@@ -36,9 +36,9 @@ CREATE TABLE `matches` (
   `updated_at` integer NOT NULL
 );
 
-CREATE UNIQUE INDEX `matches_code_unique` ON `matches` (`code`);
+CREATE UNIQUE INDEX IF NOT EXISTS `matches_code_unique` ON `matches` (`code`);
 
-CREATE TABLE `frames` (
+CREATE TABLE IF NOT EXISTS `frames` (
   `id` integer PRIMARY KEY AUTOINCREMENT NOT NULL,
   `match_id` text NOT NULL,
   `frame_number` integer NOT NULL,
@@ -52,7 +52,7 @@ CREATE TABLE `frames` (
   FOREIGN KEY (`match_id`) REFERENCES `matches`(`id`) ON UPDATE no action ON DELETE no action
 );
 
-CREATE TABLE `match_history` (
+CREATE TABLE IF NOT EXISTS `match_history` (
   `id` integer PRIMARY KEY AUTOINCREMENT NOT NULL,
   `match_id` text NOT NULL,
   `archive_version` integer NOT NULL,
@@ -70,4 +70,4 @@ CREATE TABLE `match_history` (
   `snapshot` text NOT NULL
 );
 
-CREATE UNIQUE INDEX `match_history_match_archive_version_unique` ON `match_history` (`match_id`, `archive_version`);
+CREATE UNIQUE INDEX IF NOT EXISTS `match_history_match_archive_version_unique` ON `match_history` (`match_id`, `archive_version`);
