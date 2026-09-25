@@ -1,135 +1,18 @@
-import { and, asc, desc, eq, inArray } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 
-import { frames, matches, matchHistory, users, type Frame, type Match } from "./db/schema";
+import { matches, matchHistory } from "./db/schema";
+import {
+  deleteArchivedMatchVersion,
+  serializeMatchSnapshot,
+  type AdminMatchSnapshot,
+  type AdminMatchStatus,
+  type MatchStatePayload,
+} from "./match-logic";
 
 type Database = ReturnType<typeof drizzle>;
 
-type PlayerSlot = 1 | 2;
-
-export type ArchivedMatchStatus = "completed" | "closed" | "expired";
-export type AdminMatchStatus = "ongoing" | ArchivedMatchStatus;
-
-export type AdminMatchSnapshot = {
-  matchId: string;
-  code: string;
-  archiveVersion: number;
-  status: AdminMatchStatus;
-  targetWins: number;
-  players: {
-    1: string | null;
-    2: string | null;
-  };
-  frames: Array<{
-    number: number;
-    breakerSlot: PlayerSlot | null;
-    winnerSlot: PlayerSlot | null;
-    player1Fouls: number;
-    player2Fouls: number;
-  }>;
-  totalWins: {
-    1: number;
-    2: number;
-  };
-  winnerSlot: PlayerSlot | null;
-  createdAt: string;
-  updatedAt: string;
-  archivedAt: string | null;
-};
-
-function isPlayerSlot(value: unknown): value is PlayerSlot {
-  return value === 1 || value === 2;
-}
-
-function oppositeSlot(slot: PlayerSlot): PlayerSlot {
-  return slot === 1 ? 2 : 1;
-}
-
-function resolveOpeningSlot(match: Match): PlayerSlot {
-  return isPlayerSlot(match.openingSlot) ? match.openingSlot : 1;
-}
-
-function resolveFrameBreakerSlot(match: Match, frame: Frame, previousBreakerSlot: PlayerSlot | null) {
-  if (isPlayerSlot(frame.breakerSlot)) {
-    return frame.breakerSlot;
-  }
-
-  return previousBreakerSlot
-    ? oppositeSlot(previousBreakerSlot)
-    : resolveOpeningSlot(match);
-}
-
-function resolveFrameBreakerSlots(match: Match, frameRows: Frame[]) {
-  let previousBreakerSlot: PlayerSlot | null = null;
-
-  return frameRows.map((frame) => {
-    const breakerSlot = resolveFrameBreakerSlot(match, frame, previousBreakerSlot);
-    previousBreakerSlot = breakerSlot;
-    return breakerSlot;
-  });
-}
-
-function calculateTotalWins(frameRows: Frame[]) {
-  let player1 = 0;
-  let player2 = 0;
-
-  for (const frame of frameRows) {
-    if (frame.winnerSlot === 1) {
-      player1 += 1;
-    } else if (frame.winnerSlot === 2) {
-      player2 += 1;
-    }
-  }
-
-  return {
-    1: player1,
-    2: player2,
-  };
-}
-
-function determineWinnerSlot(match: Match, frameRows: Frame[]) {
-  const totals = calculateTotalWins(frameRows);
-
-  if (totals[1] >= match.targetWins) {
-    return 1 as const;
-  }
-
-  if (totals[2] >= match.targetWins) {
-    return 2 as const;
-  }
-
-  return null;
-}
-
-function serializeSnapshot(match: Match, frameRows: Frame[], status: AdminMatchStatus, archivedAt: Date | null) {
-  const breakerSlots = resolveFrameBreakerSlots(match, frameRows);
-  const totalWins = calculateTotalWins(frameRows);
-  const winnerSlot = determineWinnerSlot(match, frameRows);
-
-  return {
-    matchId: match.id,
-    code: match.code,
-    archiveVersion: match.archiveVersion,
-    status,
-    targetWins: match.targetWins,
-    players: {
-      1: match.player1Name ?? null,
-      2: match.player2Name ?? null,
-    },
-    frames: frameRows.map((frame, index) => ({
-      number: frame.frameNumber,
-      breakerSlot: breakerSlots[index] ?? null,
-      winnerSlot: frame.winnerSlot === 1 || frame.winnerSlot === 2 ? frame.winnerSlot : null,
-      player1Fouls: frame.player1Fouls,
-      player2Fouls: frame.player2Fouls,
-    })),
-    totalWins,
-    winnerSlot,
-    createdAt: match.createdAt.toISOString(),
-    updatedAt: match.updatedAt.toISOString(),
-    archivedAt: archivedAt ? archivedAt.toISOString() : null,
-  } satisfies AdminMatchSnapshot;
-}
+export type { AdminMatchSnapshot, AdminMatchStatus };
 
 function parseSnapshot(value: string): AdminMatchSnapshot | null {
   try {
@@ -145,53 +28,6 @@ function parseSnapshot(value: string): AdminMatchSnapshot | null {
   }
 }
 
-export async function syncArchivedMatch(
-  db: Database,
-  match: Match,
-  frameRows: Frame[],
-  fallbackStatus: ArchivedMatchStatus,
-  archivedAt = new Date(),
-) {
-  const status = determineWinnerSlot(match, frameRows) ? "completed" : fallbackStatus;
-  const snapshot = serializeSnapshot(match, frameRows, status, archivedAt);
-  const values = {
-    matchId: match.id,
-    archiveVersion: match.archiveVersion,
-    code: match.code,
-    status,
-    winnerSlot: snapshot.winnerSlot,
-    targetWins: match.targetWins,
-    player1Name: snapshot.players[1],
-    player2Name: snapshot.players[2],
-    player1Wins: snapshot.totalWins[1],
-    player2Wins: snapshot.totalWins[2],
-    createdAt: match.createdAt,
-    updatedAt: match.updatedAt,
-    archivedAt,
-    snapshot: JSON.stringify(snapshot),
-  };
-
-  const existing = await db
-    .select({ id: matchHistory.id })
-    .from(matchHistory)
-    .where(and(eq(matchHistory.matchId, match.id), eq(matchHistory.archiveVersion, match.archiveVersion)))
-    .get();
-
-  if (existing) {
-    await db.update(matchHistory).set(values).where(eq(matchHistory.id, existing.id));
-  } else {
-    await db.insert(matchHistory).values(values);
-  }
-
-  return snapshot;
-}
-
-export async function deleteArchivedMatch(db: Database, matchId: string, archiveVersion: number) {
-  await db
-    .delete(matchHistory)
-    .where(and(eq(matchHistory.matchId, matchId), eq(matchHistory.archiveVersion, archiveVersion)));
-}
-
 export async function deleteArchivedMatchById(database: D1Database, matchId: string, archiveVersion: number) {
   const db = drizzle(database);
   const existing = await db
@@ -204,59 +40,64 @@ export async function deleteArchivedMatchById(database: D1Database, matchId: str
     return false;
   }
 
-  await deleteArchivedMatch(db, matchId, archiveVersion);
+  await deleteArchivedMatchVersion(db, matchId, archiveVersion);
   return true;
 }
 
-export async function forceEndActiveMatch(database: D1Database, matchId: string) {
+/**
+ * Ongoing matches come from the registry joined with each room's live state;
+ * history comes from the archived snapshots in D1.
+ */
+export async function loadAdminDashboard(
+  database: D1Database,
+  fetchLiveState: (matchId: string) => Promise<MatchStatePayload | null>,
+) {
   const db = drizzle(database);
-  const match = await db.select().from(matches).where(eq(matches.id, matchId)).get();
+  const registryRows = await db.select().from(matches).orderBy(desc(matches.updatedAt)).all();
+  const ongoingMatches: AdminMatchSnapshot[] = [];
 
-  if (!match) {
-    return false;
+  for (const row of registryRows) {
+    const state = await fetchLiveState(row.id).catch(() => null);
+
+    if (!state) {
+      continue;
+    }
+
+    const snapshot = serializeMatchSnapshot(
+      {
+        matchId: row.id,
+        code: row.code,
+        archiveVersion: row.archiveVersion,
+        core: {
+          targetWins: state.targetWins,
+          openingSlot: row.openingSlot === 2 ? 2 : 1,
+        },
+        seats: {
+          player1UserId: row.player1UserId,
+          player1Name: row.player1Name,
+          player2UserId: row.player2UserId,
+          player2Name: row.player2Name,
+        },
+        createdAtMs: row.createdAt.getTime(),
+        updatedAtMs: row.updatedAt.getTime(),
+      },
+      state.frames.map((frame) => ({
+        frameNumber: frame.number,
+        breakerSlot: frame.breakerSlot,
+        winnerSlot: frame.winnerSlot,
+        player1Fouls: frame.player1Fouls,
+        player2Fouls: frame.player2Fouls,
+        startedAt: Date.parse(frame.startAt),
+        endedAt: frame.endAt ? Date.parse(frame.endAt) : null,
+      })),
+      "ongoing",
+      null,
+    );
+
+    if (snapshot.winnerSlot == null) {
+      ongoingMatches.push(snapshot);
+    }
   }
-
-  const frameRows = await db
-    .select()
-    .from(frames)
-    .where(eq(frames.matchId, matchId))
-    .orderBy(asc(frames.frameNumber))
-    .all();
-
-  const now = new Date();
-  await syncArchivedMatch(db, match, frameRows, "closed", now);
-
-  // Detach any users that referenced this match, then delete frames + match.
-  await db
-    .update(users)
-    .set({ currentMatchId: null, updatedAt: now })
-    .where(eq(users.currentMatchId, matchId));
-
-  await db.delete(frames).where(eq(frames.matchId, matchId));
-  await db.delete(matches).where(eq(matches.id, matchId));
-  return true;
-}
-
-export async function loadAdminDashboard(database: D1Database) {
-  const db = drizzle(database);
-
-  const liveMatches = await db.select().from(matches).orderBy(desc(matches.updatedAt)).all();
-  const liveMatchIds = liveMatches.map((match) => match.id);
-  const liveFrames = liveMatchIds.length > 0
-    ? await db.select().from(frames).where(inArray(frames.matchId, liveMatchIds)).orderBy(asc(frames.frameNumber)).all()
-    : [];
-
-  const framesByMatchId = new Map<string, Frame[]>();
-
-  for (const frame of liveFrames) {
-    const bucket = framesByMatchId.get(frame.matchId) ?? [];
-    bucket.push(frame);
-    framesByMatchId.set(frame.matchId, bucket);
-  }
-
-  const ongoingMatches = liveMatches
-    .map((match) => serializeSnapshot(match, framesByMatchId.get(match.id) ?? [], "ongoing", null))
-    .filter((match) => match.winnerSlot == null);
 
   const historyRows = await db.select().from(matchHistory).orderBy(desc(matchHistory.archivedAt)).all();
   const historyMatches = historyRows

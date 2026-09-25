@@ -1167,16 +1167,53 @@ describe("pool scoreboard app", () => {
     const socket = wsRes.webSocket;
     expect(socket).toBeTruthy();
 
-    const messages: string[] = [];
-    const received = new Promise<string>((resolve) => {
-      socket!.addEventListener("message", (event) => {
-        const data = typeof event.data === "string" ? event.data : "";
-        messages.push(data);
-        resolve(data);
+    type RoomMessage = Record<string, any>;
+    const messages: RoomMessage[] = [];
+
+    function waitForMessage(predicate: (message: RoomMessage) => boolean) {
+      const deadline = Date.now() + 5000;
+
+      return new Promise<RoomMessage>((resolve, reject) => {
+        const tick = () => {
+          const found = messages.find(predicate);
+
+          if (found) {
+            resolve(found);
+          } else if (Date.now() > deadline) {
+            reject(new Error("timed out waiting for room message"));
+          } else {
+            setTimeout(tick, 25);
+          }
+        };
+
+        tick();
       });
+    }
+
+    socket!.addEventListener("message", (event) => {
+      if (typeof event.data === "string") {
+        try {
+          messages.push(JSON.parse(event.data) as RoomMessage);
+        } catch {
+          // Ignore non-JSON frames.
+        }
+      }
     });
 
     socket!.accept();
+
+    const initialState = await waitForMessage(
+      (message) => message.type === "match-updated" && message.match?.frames?.length === 1,
+    );
+    expect(initialState.match).toMatchObject({
+      code: createBody.match.code,
+      totalWins: { 1: 0, 2: 0 },
+      players: [{ slot: 1, name: "Alice", isSelf: true }, { slot: 2, name: "Bob", isSelf: false }],
+    });
+    expect(typeof initialState.match.revision).toBe("number");
+
+    socket!.send(JSON.stringify({ type: "ping" }));
+    await waitForMessage((message) => message.type === "pong");
 
     const winRes = await app.request(
       "http://localhost/api/matches/current/frames/1/winner",
@@ -1189,9 +1226,17 @@ describe("pool scoreboard app", () => {
     );
     expect(winRes.status).toBe(200);
 
-    const data = await received;
-    expect(JSON.parse(data)).toMatchObject({ type: "match-updated" });
-    expect(messages.length).toBeGreaterThan(0);
+    const winPush = await waitForMessage(
+      (message) => message.type === "match-updated" && message.match?.totalWins?.["2"] === 1,
+    );
+    expect(winPush.match.frames).toHaveLength(2);
+
+    socket!.send(JSON.stringify({ type: "command", command: { type: "setFouls", frameNumber: 2, slot: 1, value: 3 } }));
+    const commandPush = await waitForMessage(
+      (message) => message.type === "match-updated"
+        && message.match?.frames?.some((frame: any) => frame.number === 2 && frame.player1Fouls === 3),
+    );
+    expect(commandPush.match.frames).toHaveLength(2);
 
     socket!.close(1000, "done");
   });

@@ -19,6 +19,10 @@ Players just enter a name, create or join a match by code, and keep score from t
 
 A player can only be in one match at a time, and each match holds two players. If someone leaves, a new player can take the open seat.
 
+## How it works
+
+Live match state (frames, fouls, winners) is kept in a `MatchRoom` Durable Object next to both players' WebSocket connections, so every score change is applied locally and pushed to both screens within one network round trip. D1 stores only the match registry (codes and seats) and the archived history for `/admin`. Idle matches expire via the room's storage alarm, with a Cron Trigger sweeper as a backstop.
+
 **Admins**
 
 Visit `/admin` and sign in with the admin password to:

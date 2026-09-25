@@ -1,14 +1,31 @@
-import { and, asc, eq, inArray, isNull, lt, or } from "drizzle-orm";
+import { and, eq, isNull, lt, or, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import type { Context } from "hono";
 import { Hono } from "hono";
 import { getCookie, setCookie } from "hono/cookie";
 import { createI18n } from "hono-i18n";
 
-import { deleteArchivedMatch, deleteArchivedMatchById, forceEndActiveMatch, loadAdminDashboard, renderAdminPage, syncArchivedMatch } from "./admin";
+import { deleteArchivedMatchById, loadAdminDashboard, renderAdminPage } from "./admin";
 import { clearSession, getAuthenticatedUser, isAdminUser, loginAdmin, upsertSessionUser } from "./auth";
-import { frames, matches, users, type Frame, type Match, type User } from "./db/schema";
-import { MatchRoom, matchRoomConnectUrl, matchRoomNotifyUrl } from "./match-room";
+import { frames, matches, sessions, users, type Match, type User } from "./db/schema";
+import {
+  DEFAULT_TARGET_WINS,
+  MATCH_IDLE_TTL_MS,
+  MAX_NAME_LENGTH,
+  isPlayerSlot,
+  parseInteger,
+  type MatchStatePayload,
+  type PlayerSlot,
+} from "./match-logic";
+import {
+  MatchRoom,
+  matchRoomCloseUrl,
+  matchRoomCommandUrl,
+  matchRoomConnectUrl,
+  matchRoomNotifyUrl,
+  matchRoomStateUrl,
+  type MatchRoomCommand,
+} from "./match-room";
 
 export { MatchRoom };
 
@@ -20,31 +37,7 @@ type Bindings = {
 
 type AppContext = Context<{ Bindings: Bindings }>;
 
-type PlayerSlot = 1 | 2;
-
-type MatchState = {
-  code: string;
-  targetWins: number;
-  players: Array<{
-    slot: 1 | 2;
-    name: string | null;
-    occupied: boolean;
-    isSelf: boolean;
-  }>;
-  frames: Array<{
-    number: number;
-    breakerSlot: PlayerSlot;
-    winnerSlot: PlayerSlot | null;
-    player1Fouls: number;
-    player2Fouls: number;
-    startAt: string;
-    endAt: string | null;
-  }>;
-  totalWins: {
-    1: number;
-    2: number;
-  };
-  winnerSlot: 1 | 2 | null;
+type MatchStateResponse = MatchStatePayload & {
   winnerMessage: string | null;
 };
 
@@ -401,12 +394,6 @@ app.use(i18nMiddleware);
 
 type Translate = ReturnType<typeof getI18n>;
 
-const DEFAULT_TARGET_WINS = 7;
-const MAX_NAME_LENGTH = 24;
-const MAX_TARGET_WINS = 99;
-const MAX_FOULS = 99;
-const MATCH_IDLE_TTL_MS = 1000 * 60 * 60 * 6;
-
 function getDatabase(c: AppContext) {
   return drizzle(c.env.DB);
 }
@@ -444,267 +431,12 @@ function normalizeCode(value: unknown) {
   return /^\d{2,}$/.test(trimmed) ? trimmed : null;
 }
 
-function parseInteger(value: unknown) {
-  if (typeof value === "number" && Number.isInteger(value)) {
-    return value;
-  }
-
-  if (typeof value === "string" && /^-?\d+$/.test(value.trim())) {
-    return Number(value.trim());
-  }
-
-  return null;
-}
-
-function clamp(value: number, minimum: number, maximum: number) {
-  return Math.min(maximum, Math.max(minimum, value));
-}
-
-function isPlayerSlot(value: unknown): value is PlayerSlot {
-  return value === 1 || value === 2;
-}
-
-function oppositeSlot(slot: PlayerSlot): PlayerSlot {
-  return slot === 1 ? 2 : 1;
-}
-
-function resolveOpeningSlot(match: Match): PlayerSlot {
-  return isPlayerSlot(match.openingSlot) ? match.openingSlot : 1;
-}
-
-function resolveFrameBreakerSlot(match: Match, frame: Frame, previousBreakerSlot: PlayerSlot | null) {
-  if (isPlayerSlot(frame.breakerSlot)) {
-    return frame.breakerSlot;
-  }
-
-  return previousBreakerSlot
-    ? oppositeSlot(previousBreakerSlot)
-    : resolveOpeningSlot(match);
-}
-
-function resolveFrameBreakerSlots(match: Match, frameRows: Frame[]) {
-  let previousBreakerSlot: PlayerSlot | null = null;
-
-  return frameRows.map((frame) => {
-    const breakerSlot = resolveFrameBreakerSlot(match, frame, previousBreakerSlot);
-    previousBreakerSlot = breakerSlot;
-    return breakerSlot;
-  });
-}
-
-function playerName(t: Translate, match: Match, slot: 1 | 2) {
-  const name = slot === 1 ? match.player1Name : match.player2Name;
-  return name || t("defaultPlayer", { slot: String(slot) });
-}
-
-function isFrameEmpty(frame: Frame) {
-  return frame.winnerSlot == null && frame.player1Fouls === 0 && frame.player2Fouls === 0;
-}
-
-function calculateTotalWins(frameRows: Frame[]) {
-  let player1 = 0;
-  let player2 = 0;
-
-  for (const frame of frameRows) {
-    if (frame.winnerSlot === 1) {
-      player1 += 1;
-    } else if (frame.winnerSlot === 2) {
-      player2 += 1;
-    }
-  }
-
-  return {
-    1: player1,
-    2: player2,
-  };
-}
-
-function determineWinnerSlot(match: Match, frameRows: Frame[]) {
-  const totals = calculateTotalWins(frameRows);
-
-  if (totals[1] >= match.targetWins) {
-    return 1 as const;
-  }
-
-  if (totals[2] >= match.targetWins) {
-    return 2 as const;
-  }
-
-  return null;
-}
-
-function serializeFrameEndAt(frame: Frame) {
-  return frame.endedAt ? frame.endedAt.toISOString() : null;
-}
-
 async function readJson<T>(c: AppContext) {
   try {
     return await c.req.json<T>();
   } catch {
     return null;
   }
-}
-
-async function cleanupStaleMatches(c: AppContext) {
-  const db = getDatabase(c);
-  const cutoff = new Date(Date.now() - MATCH_IDLE_TTL_MS);
-  const staleMatches = await db
-    .select()
-    .from(matches)
-    .where(
-      or(
-        and(isNull(matches.player1UserId), isNull(matches.player2UserId)),
-        lt(matches.updatedAt, cutoff),
-      ),
-    )
-    .all();
-
-  if (staleMatches.length === 0) {
-    return;
-  }
-
-  const staleIds = staleMatches.map((match) => match.id);
-  const now = new Date();
-
-  await db
-    .update(users)
-    .set({
-      currentMatchId: null,
-      updatedAt: now,
-    })
-    .where(inArray(users.currentMatchId, staleIds));
-
-  for (const match of staleMatches) {
-    const frameRows = await db.select().from(frames).where(eq(frames.matchId, match.id)).orderBy(asc(frames.frameNumber)).all();
-    await syncArchivedMatch(db, match, frameRows, "expired", now);
-  }
-
-  await db.delete(frames).where(inArray(frames.matchId, staleIds));
-  await db.delete(matches).where(inArray(matches.id, staleIds));
-}
-
-async function normalizeFrames(c: AppContext, match: Match, timestamp = new Date()) {
-  const db = getDatabase(c);
-  const frameRows = await db.select().from(frames).where(eq(frames.matchId, match.id)).orderBy(asc(frames.frameNumber)).all();
-
-  if (frameRows.length === 0) {
-    await db.insert(frames).values({
-      matchId: match.id,
-      frameNumber: 1,
-      breakerSlot: null,
-      winnerSlot: null,
-      player1Fouls: 0,
-      player2Fouls: 0,
-      endedAt: null,
-      createdAt: timestamp,
-      updatedAt: timestamp,
-    });
-    return;
-  }
-
-  let working = frameRows.slice();
-  const winnerSlot = determineWinnerSlot(match, working);
-
-  if (winnerSlot) {
-    while (working.length > 1 && isFrameEmpty(working[working.length - 1]!)) {
-      const removable = working.pop();
-
-      if (removable) {
-        await db.delete(frames).where(eq(frames.id, removable.id));
-      }
-    }
-
-    return;
-  }
-
-  while (
-    working.length > 1
-    && isFrameEmpty(working[working.length - 1]!)
-    && isFrameEmpty(working[working.length - 2]!)
-  ) {
-    const removable = working.pop();
-
-    if (removable) {
-      await db.delete(frames).where(eq(frames.id, removable.id));
-    }
-  }
-
-  const lastFrame = working[working.length - 1]!;
-
-  if (lastFrame.winnerSlot != null) {
-    const nextFrameStartedAt = lastFrame.endedAt ?? timestamp;
-    await db.insert(frames).values({
-      matchId: match.id,
-      frameNumber: lastFrame.frameNumber + 1,
-      breakerSlot: null,
-      winnerSlot: null,
-      player1Fouls: 0,
-      player2Fouls: 0,
-      endedAt: null,
-      createdAt: nextFrameStartedAt,
-      updatedAt: nextFrameStartedAt,
-    });
-  }
-}
-
-async function loadMatchState(c: AppContext, matchId: string, currentUserId: number | null) {
-  const db = getDatabase(c);
-  const t = getI18n(c);
-  const match = await db.select().from(matches).where(eq(matches.id, matchId)).get();
-
-  if (!match) {
-    return null;
-  }
-
-  await normalizeFrames(c, match);
-  const frameRows = await db.select().from(frames).where(eq(frames.matchId, match.id)).orderBy(asc(frames.frameNumber)).all();
-  const breakerSlots = resolveFrameBreakerSlots(match, frameRows);
-  const totalWins = calculateTotalWins(frameRows);
-  const winnerSlot = determineWinnerSlot(match, frameRows);
-  const winnerMessage = winnerSlot
-    ? t("winnerMessage", {
-      winner: playerName(t, match, winnerSlot),
-      player1: playerName(t, match, 1),
-      score1: String(totalWins[1]),
-      player2: playerName(t, match, 2),
-      score2: String(totalWins[2]),
-    })
-    : null;
-
-  return {
-    code: match.code,
-    targetWins: match.targetWins,
-    players: [
-      {
-        slot: 1 as const,
-        name: match.player1UserId ? match.player1Name : null,
-        occupied: Boolean(match.player1UserId),
-        isSelf: match.player1UserId === currentUserId,
-      },
-      {
-        slot: 2 as const,
-        name: match.player2UserId ? match.player2Name : null,
-        occupied: Boolean(match.player2UserId),
-        isSelf: match.player2UserId === currentUserId,
-      },
-    ],
-    frames: frameRows.map((frame, index) => {
-      const frameWinnerSlot = frame.winnerSlot === 1 || frame.winnerSlot === 2 ? frame.winnerSlot : null;
-
-      return {
-        number: frame.frameNumber,
-        breakerSlot: breakerSlots[index]!,
-        winnerSlot: frameWinnerSlot,
-        player1Fouls: frame.player1Fouls,
-        player2Fouls: frame.player2Fouls,
-        startAt: frame.createdAt.toISOString(),
-        endAt: frameWinnerSlot ? serializeFrameEndAt(frame) : null,
-      };
-    }),
-    totalWins,
-    winnerSlot,
-    winnerMessage,
-  } satisfies MatchState;
 }
 
 async function clearUserCurrentMatch(c: AppContext, userId: number) {
@@ -738,6 +470,13 @@ async function loadCurrentMatchContext(c: AppContext, user: User) {
     return null;
   }
 
+  // Lazy expiry: the room's alarm is the primary sweeper, but this check keeps
+  // a stale match from re-entering a session if the alarm never fired.
+  if (match.updatedAt.getTime() < Date.now() - MATCH_IDLE_TTL_MS) {
+    await closeMatchRoom(c, match.id, "expired");
+    return null;
+  }
+
   return {
     match,
     slot: slot as 1 | 2,
@@ -745,7 +484,6 @@ async function loadCurrentMatchContext(c: AppContext, user: User) {
 }
 
 async function ensureCurrentMatch(c: AppContext) {
-  await cleanupStaleMatches(c);
   const t = getI18n(c);
   const user = await getAuthenticatedUser(c);
 
@@ -839,39 +577,116 @@ async function ensureAdminSession(c: AppContext) {
   };
 }
 
-async function respondWithCurrentState(c: AppContext, user: User) {
-  const freshUser = await getDatabase(c).select().from(users).where(eq(users.id, user.id)).get();
-  const currentUser = freshUser ?? user;
-  const context = await loadCurrentMatchContext(c, currentUser);
-  const matchState = context ? await loadMatchState(c, context.match.id, currentUser.id) : null;
-  return c.json({ user: serializeUser(currentUser), match: matchState });
-}
-
 function getMatchRoomStub(c: AppContext, matchId: string) {
   const id = c.env.MATCH_ROOM.idFromName(matchId);
   return c.env.MATCH_ROOM.get(id);
 }
 
-function notifyMatchRoom(c: AppContext, matchId: string) {
+async function fetchMatchRoomState(c: AppContext, matchId: string, userId: number | null): Promise<MatchStatePayload | null> {
   const stub = getMatchRoomStub(c, matchId);
-  const task = stub.fetch(matchRoomNotifyUrl(), {
+  const res = await stub.fetch(matchRoomStateUrl(userId, matchId));
+
+  if (res.status === 404) {
+    return null;
+  }
+
+  if (!res.ok) {
+    throw new Error(`match room state request failed (${res.status})`);
+  }
+
+  return await res.json<MatchStatePayload>();
+}
+
+type RoomCommandOutcome =
+  | { ok: true; state: MatchStatePayload }
+  | { ok: false; code: string; status: number };
+
+async function sendMatchRoomCommand(c: AppContext, matchId: string, userId: number, command: MatchRoomCommand): Promise<RoomCommandOutcome> {
+  const stub = getMatchRoomStub(c, matchId);
+  const res = await stub.fetch(matchRoomCommandUrl(matchId), {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ event: "match-updated" }),
+    body: JSON.stringify({ userId, command }),
   });
 
-  let executionCtx: ExecutionContext | null = null;
-  try {
-    executionCtx = c.executionCtx ?? null;
-  } catch {
-    executionCtx = null;
+  if (res.ok) {
+    const payload = await res.json<{ match: MatchStatePayload }>();
+    return { ok: true, state: payload.match };
   }
 
-  if (executionCtx && typeof executionCtx.waitUntil === "function") {
-    executionCtx.waitUntil(task.then(() => undefined).catch(() => undefined));
-  } else {
-    void task.catch(() => undefined);
+  const payload = await res.json<{ error?: string }>().catch(() => null);
+  return { ok: false, code: payload?.error ?? "room_error", status: res.status };
+}
+
+async function closeMatchRoom(c: AppContext, matchId: string, status: "closed" | "expired") {
+  const stub = getMatchRoomStub(c, matchId);
+  const res = await stub.fetch(matchRoomCloseUrl(matchId), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ status }),
+  });
+
+  // 404 means the room already closed; callers treat this as idempotent.
+  return res.ok;
+}
+
+async function notifyMatchRoomRegistry(c: AppContext, matchId: string, remainingSlot: PlayerSlot | null) {
+  const stub = getMatchRoomStub(c, matchId);
+  await stub
+    .fetch(matchRoomNotifyUrl(matchId), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ remainingSlot }),
+    })
+    .catch(() => undefined);
+}
+
+function composeWinnerMessage(t: Translate, state: MatchStatePayload) {
+  if (state.winnerSlot == null) {
+    return null;
   }
+
+  const nameOf = (slot: PlayerSlot) =>
+    state.players.find((player) => player.slot === slot)?.name || t("defaultPlayer", { slot: String(slot) });
+
+  return t("winnerMessage", {
+    winner: nameOf(state.winnerSlot),
+    player1: nameOf(1),
+    score1: String(state.totalWins[1]),
+    player2: nameOf(2),
+    score2: String(state.totalWins[2]),
+  });
+}
+
+function withWinnerMessage(c: AppContext, state: MatchStatePayload): MatchStateResponse {
+  return { ...state, winnerMessage: composeWinnerMessage(getI18n(c), state) };
+}
+
+function respondWithMatchState(c: AppContext, user: User, state: MatchStatePayload | null) {
+  return c.json({ user: serializeUser(user), match: state ? withWinnerMessage(c, state) : null });
+}
+
+async function respondToRoomCommand(c: AppContext, user: User, outcome: RoomCommandOutcome) {
+  const t = getI18n(c);
+
+  if (outcome.ok) {
+    return respondWithMatchState(c, user, outcome.state);
+  }
+
+  if (outcome.code === "frame_not_found") {
+    return c.json({ error: t("errorFrameNotFound") }, 404);
+  }
+
+  if (outcome.code === "match_not_found") {
+    await clearUserCurrentMatch(c, user.id);
+    return c.json({ error: t("errorNoCurrentMatch") }, 404);
+  }
+
+  if (outcome.code === "forbidden") {
+    return c.json({ error: t("errorNoCurrentMatch") }, 403);
+  }
+
+  return c.json({ error: t("statusUnknownError") }, 400);
 }
 
 function renderHomePage(c: AppContext, pageMode: "lobby" | "admin" = "lobby") {
@@ -913,6 +728,7 @@ function renderHomePage(c: AppContext, pageMode: "lobby" | "admin" = "lobby") {
       "pageReloading",
       "languageSwitchError",
       "defaultPlayer",
+      "winnerMessage",
       "emptySeat",
       "lobbyCreateTitle",
       "lobbyCreateHint",
@@ -1454,18 +1270,50 @@ function renderHomePage(c: AppContext, pageMode: "lobby" | "admin" = "lobby") {
         return payload;
       }
 
+      function computeWinnerMessage(match) {
+        if (!match || match.winnerSlot == null) {
+          return null;
+        }
+
+        const nameOf = (slot) => {
+          const player = match.players.find((candidate) => candidate.slot === slot);
+          return (player && player.name) || translate("defaultPlayer", { slot: String(slot) });
+        };
+
+        return translate("winnerMessage", {
+          winner: nameOf(match.winnerSlot),
+          player1: nameOf(1),
+          score1: String(match.totalWins[1]),
+          player2: nameOf(2),
+          score2: String(match.totalWins[2]),
+        });
+      }
+
       function applyPayload(payload) {
         if (Object.prototype.hasOwnProperty.call(payload, "user")) {
           state.user = payload.user;
         }
         if (Object.prototype.hasOwnProperty.call(payload, "match")) {
-          const previousCode = state.match ? state.match.code : null;
-          state.match = payload.match;
+          const previous = state.match;
+          const next = payload.match;
+          const staleRevision = Boolean(
+            previous
+            && next
+            && next.code === previous.code
+            && typeof next.revision === "number"
+            && typeof previous.revision === "number"
+            && next.revision < previous.revision,
+          );
 
-          if (!state.match || (previousCode && state.match.code !== previousCode)) {
-            resetMatchInteractionState();
-          } else {
-            pruneInteractionState();
+          if (!staleRevision) {
+            state.match = next ? Object.assign({}, next, { winnerMessage: computeWinnerMessage(next) }) : next;
+
+            const previousCode = previous ? previous.code : null;
+            if (!state.match || (previousCode && state.match.code !== previousCode)) {
+              resetMatchInteractionState();
+            } else {
+              pruneInteractionState();
+            }
           }
         }
       }
@@ -2062,6 +1910,7 @@ ${isAdminPage ? `
         wantOpen: false,
         matchCode: null,
         reconnectTimer: null,
+        lastPongAt: 0,
       };
 
       async function refreshFromRealtime() {
@@ -2095,7 +1944,7 @@ ${isAdminPage ? `
           realtime.reconnectTimer = null;
           openRealtime();
         }, delay);
-        realtime.retryDelay = Math.min(delay * 2, 15000);
+        realtime.retryDelay = Math.min(delay * 2, 5000);
       }
 
       function openRealtime() {
@@ -2115,12 +1964,19 @@ ${isAdminPage ? `
 
         socket.addEventListener("open", () => {
           realtime.retryDelay = 1000;
+          realtime.lastPongAt = Date.now();
         });
 
         socket.addEventListener("message", (event) => {
+          realtime.lastPongAt = Date.now();
           let payload = null;
           try { payload = JSON.parse(event.data); } catch (_e) { return; }
-          if (payload && payload.type === "match-updated") {
+          if (!payload) return;
+          if (payload.type === "match-updated" && payload.match) {
+            applyPayload({ match: payload.match });
+            render();
+            setStatus(readyStatus());
+          } else if (payload.type === "match-closed") {
             void refreshFromRealtime();
           }
         });
@@ -2134,6 +1990,37 @@ ${isAdminPage ? `
           try { socket.close(); } catch (_e) {}
         });
       }
+
+      // Detect silently dead connections (phone sleep, network switch): the
+      // room answers every ping with a pong, and two missed rounds force a
+      // reconnect. The room pushes the full state on connect and on every
+      // refresh request, so reconnecting always lands on fresh state.
+      window.setInterval(() => {
+        if (!realtime.wantOpen || !realtime.socket) return;
+        if (realtime.socket.readyState !== 1) return;
+        if (Date.now() - realtime.lastPongAt > 70000) {
+          try { realtime.socket.close(4000, "heartbeat timeout"); } catch (_e) {}
+          return;
+        }
+        try { realtime.socket.send(JSON.stringify({ type: "ping" })); } catch (_e) {}
+      }, 25000);
+
+      function resyncAfterWake() {
+        if (!realtime.wantOpen) return;
+        if (!realtime.socket || realtime.socket.readyState > 1) {
+          openRealtime();
+        } else if (realtime.socket.readyState === 1) {
+          try { realtime.socket.send(JSON.stringify({ type: "refresh" })); } catch (_e) {}
+        }
+        void refreshFromRealtime();
+      }
+
+      document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState === "visible") {
+          resyncAfterWake();
+        }
+      });
+      window.addEventListener("online", resyncAfterWake);
 
       function syncRealtime() {
         const matchCode = state.match ? state.match.code : null;
@@ -2185,7 +2072,6 @@ app.post("/api/locale", async (c) => {
 });
 
 app.get("/api/session", async (c) => {
-  await cleanupStaleMatches(c);
   const user = await getAuthenticatedUser(c);
 
   if (!user) {
@@ -2193,8 +2079,13 @@ app.get("/api/session", async (c) => {
   }
 
   const context = await loadCurrentMatchContext(c, user);
-  const matchState = context ? await loadMatchState(c, context.match.id, user.id) : null;
-  return c.json({ user: serializeUser(user), match: matchState });
+  const matchState = context ? await fetchMatchRoomState(c, context.match.id, user.id) : null;
+
+  if (context && !matchState) {
+    await clearUserCurrentMatch(c, user.id);
+  }
+
+  return respondWithMatchState(c, user, matchState);
 });
 
 app.post("/api/admin/session", async (c) => {
@@ -2238,9 +2129,7 @@ app.get("/api/admin/dashboard", async (c) => {
     return admin.response;
   }
 
-  await cleanupStaleMatches(c);
-
-  return c.json(await loadAdminDashboard(c.env.DB));
+  return c.json(await loadAdminDashboard(c.env.DB, (matchId) => fetchMatchRoomState(c, matchId, null)));
 });
 
 app.delete("/api/admin/history/:matchId/:archiveVersion", async (c) => {
@@ -2281,19 +2170,17 @@ app.post("/api/admin/matches/:matchId/force-end", async (c) => {
     return c.json({ error: t("errorMatchNotFound") }, 400);
   }
 
-  const ended = await forceEndActiveMatch(c.env.DB, matchId);
+  const closed = await closeMatchRoom(c, matchId, "closed");
 
-  if (!ended) {
+  if (!closed) {
     return c.json({ error: t("errorMatchNotFound") }, 404);
   }
 
-  notifyMatchRoom(c, matchId);
   return c.json({ ok: true });
 });
 
 app.post("/api/matches", async (c) => {
   const t = getI18n(c);
-  await cleanupStaleMatches(c);
   const payload = await readJson<{ name?: unknown }>(c);
   const name = normalizeName(payload?.name);
 
@@ -2327,18 +2214,6 @@ app.post("/api/matches", async (c) => {
     updatedAt: now,
   });
 
-  await db.insert(frames).values({
-    matchId,
-    frameNumber: 1,
-    breakerSlot: null,
-    winnerSlot: null,
-    player1Fouls: 0,
-    player2Fouls: 0,
-    endedAt: null,
-    createdAt: now,
-    updatedAt: now,
-  });
-
   await db
     .update(users)
     .set({
@@ -2348,13 +2223,19 @@ app.post("/api/matches", async (c) => {
     })
     .where(eq(users.id, user.id));
 
-  const matchState = await loadMatchState(c, matchId, user.id);
-  return c.json({ user: serializeUser({ ...user, name, currentMatchId: matchId, updatedAt: now }), match: matchState }, 201);
+  // Contact the room so it hydrates and opens frame 1 before we reply.
+  const matchState = await fetchMatchRoomState(c, matchId, user.id);
+  return c.json(
+    {
+      user: serializeUser({ ...user, name, currentMatchId: matchId, updatedAt: now }),
+      match: matchState ? withWinnerMessage(c, matchState) : null,
+    },
+    201,
+  );
 });
 
 app.post("/api/matches/join", async (c) => {
   const t = getI18n(c);
-  await cleanupStaleMatches(c);
   const payload = await readJson<{ name?: unknown; code?: unknown }>(c);
   const name = normalizeName(payload?.name);
   const code = normalizeCode(payload?.code);
@@ -2372,8 +2253,8 @@ app.post("/api/matches/join", async (c) => {
 
   if (existingContext) {
     if (existingContext.match.code === code) {
-      const matchState = await loadMatchState(c, existingContext.match.id, user.id);
-      return c.json({ user: serializeUser(user), match: matchState });
+      const matchState = await fetchMatchRoomState(c, existingContext.match.id, user.id);
+      return respondWithMatchState(c, user, matchState);
     }
 
     return c.json({ error: t("errorAlreadyInOtherMatch") }, 409);
@@ -2383,6 +2264,11 @@ app.post("/api/matches/join", async (c) => {
   const match = await db.select().from(matches).where(eq(matches.code, code)).get();
 
   if (!match) {
+    return c.json({ error: t("errorMatchCodeNotFound") }, 404);
+  }
+
+  if (match.updatedAt.getTime() < Date.now() - MATCH_IDLE_TTL_MS) {
+    await closeMatchRoom(c, match.id, "expired");
     return c.json({ error: t("errorMatchCodeNotFound") }, 404);
   }
 
@@ -2414,9 +2300,12 @@ app.post("/api/matches/join", async (c) => {
     })
     .where(eq(users.id, user.id));
 
-  const matchState = await loadMatchState(c, match.id, user.id);
-  notifyMatchRoom(c, match.id);
-  return c.json({ user: serializeUser({ ...user, name, currentMatchId: match.id, updatedAt: now }), match: matchState });
+  await notifyMatchRoomRegistry(c, match.id, null);
+  const matchState = await fetchMatchRoomState(c, match.id, user.id);
+  return c.json({
+    user: serializeUser({ ...user, name, currentMatchId: match.id, updatedAt: now }),
+    match: matchState ? withWinnerMessage(c, matchState) : null,
+  });
 });
 
 app.post("/api/matches/current/target-wins", async (c) => {
@@ -2434,38 +2323,11 @@ app.post("/api/matches/current/target-wins", async (c) => {
     return c.json({ error: t("errorTargetWinsInteger") }, 400);
   }
 
-  const nextTargetWins = clamp(parsedValue, 1, MAX_TARGET_WINS);
-  const db = getDatabase(c);
-
-  if (current.context!.match.targetWins === nextTargetWins) {
-    return respondWithCurrentState(c, current.user!);
-  }
-
-  const now = new Date();
-
-  await db
-    .update(matches)
-    .set({
-      targetWins: nextTargetWins,
-      updatedAt: now,
-    })
-    .where(eq(matches.id, current.context!.match.id));
-
-  const updatedMatch = await db.select().from(matches).where(eq(matches.id, current.context!.match.id)).get();
-
-  if (updatedMatch) {
-    await normalizeFrames(c, updatedMatch, now);
-    const frameRows = await db.select().from(frames).where(eq(frames.matchId, updatedMatch.id)).orderBy(asc(frames.frameNumber)).all();
-
-    if (determineWinnerSlot(updatedMatch, frameRows)) {
-      await syncArchivedMatch(db, updatedMatch, frameRows, "completed", now);
-    } else {
-      await deleteArchivedMatch(db, updatedMatch.id, updatedMatch.archiveVersion);
-    }
-  }
-
-  notifyMatchRoom(c, current.context!.match.id);
-  return respondWithCurrentState(c, current.user!);
+  const outcome = await sendMatchRoomCommand(c, current.context!.match.id, current.user!.id, {
+    type: "setTargetWins",
+    value: parsedValue,
+  });
+  return respondToRoomCommand(c, current.user!, outcome);
 });
 
 app.post("/api/matches/current/frames/:frameNumber/breaker", async (c) => {
@@ -2488,35 +2350,12 @@ app.post("/api/matches/current/frames/:frameNumber/breaker", async (c) => {
     return c.json({ error: t("errorBreakerSlotInvalid") }, 400);
   }
 
-  const db = getDatabase(c);
-  const frame = await db
-    .select()
-    .from(frames)
-    .where(and(eq(frames.matchId, current.context!.match.id), eq(frames.frameNumber, frameNumber)))
-    .get();
-
-  if (!frame) {
-    return c.json({ error: t("errorFrameNotFound") }, 404);
-  }
-
-  const now = new Date();
-  await db
-    .update(frames)
-    .set({
-      breakerSlot: slot,
-      updatedAt: now,
-    })
-    .where(eq(frames.id, frame.id));
-
-  await db
-    .update(matches)
-    .set({
-      updatedAt: now,
-    })
-    .where(eq(matches.id, current.context!.match.id));
-
-  notifyMatchRoom(c, current.context!.match.id);
-  return respondWithCurrentState(c, current.user!);
+  const outcome = await sendMatchRoomCommand(c, current.context!.match.id, current.user!.id, {
+    type: "setBreaker",
+    frameNumber,
+    slot,
+  });
+  return respondToRoomCommand(c, current.user!, outcome);
 });
 
 app.post("/api/matches/current/frames/:frameNumber/winner", async (c) => {
@@ -2536,57 +2375,16 @@ app.post("/api/matches/current/frames/:frameNumber/winner", async (c) => {
 
   const slot = payload?.slot === null ? null : parseInteger(payload?.slot);
 
-  if (slot !== null && slot !== 1 && slot !== 2) {
+  if (slot !== null && !isPlayerSlot(slot)) {
     return c.json({ error: t("errorWinnerSlotInvalid") }, 400);
   }
 
-  const db = getDatabase(c);
-  const frame = await db
-    .select()
-    .from(frames)
-    .where(and(eq(frames.matchId, current.context!.match.id), eq(frames.frameNumber, frameNumber)))
-    .get();
-
-  if (!frame) {
-    return c.json({ error: t("errorFrameNotFound") }, 404);
-  }
-
-  if (frame.winnerSlot === slot) {
-    return respondWithCurrentState(c, current.user!);
-  }
-
-  const now = new Date();
-  await db
-    .update(frames)
-    .set({
-      winnerSlot: slot,
-      endedAt: slot === null ? null : now,
-      updatedAt: now,
-    })
-    .where(eq(frames.id, frame.id));
-
-  await db
-    .update(matches)
-    .set({
-      updatedAt: now,
-    })
-    .where(eq(matches.id, current.context!.match.id));
-
-  const updatedMatch = await db.select().from(matches).where(eq(matches.id, current.context!.match.id)).get();
-
-  if (updatedMatch) {
-    await normalizeFrames(c, updatedMatch, now);
-    const frameRows = await db.select().from(frames).where(eq(frames.matchId, updatedMatch.id)).orderBy(asc(frames.frameNumber)).all();
-
-    if (determineWinnerSlot(updatedMatch, frameRows)) {
-      await syncArchivedMatch(db, updatedMatch, frameRows, "completed", now);
-    } else {
-      await deleteArchivedMatch(db, updatedMatch.id, updatedMatch.archiveVersion);
-    }
-  }
-
-  notifyMatchRoom(c, current.context!.match.id);
-  return respondWithCurrentState(c, current.user!);
+  const outcome = await sendMatchRoomCommand(c, current.context!.match.id, current.user!.id, {
+    type: "setWinner",
+    frameNumber,
+    slot,
+  });
+  return respondToRoomCommand(c, current.user!, outcome);
 });
 
 app.post("/api/matches/current/frames/:frameNumber/fouls", async (c) => {
@@ -2606,7 +2404,7 @@ app.post("/api/matches/current/frames/:frameNumber/fouls", async (c) => {
     return c.json({ error: t("errorFrameInvalid") }, 400);
   }
 
-  if (slot !== 1 && slot !== 2) {
+  if (!isPlayerSlot(slot)) {
     return c.json({ error: t("errorFoulSlotInvalid") }, 400);
   }
 
@@ -2614,42 +2412,13 @@ app.post("/api/matches/current/frames/:frameNumber/fouls", async (c) => {
     return c.json({ error: t("errorFoulValueInteger") }, 400);
   }
 
-  const nextValue = clamp(value, 0, MAX_FOULS);
-  const db = getDatabase(c);
-  const frame = await db
-    .select()
-    .from(frames)
-    .where(and(eq(frames.matchId, current.context!.match.id), eq(frames.frameNumber, frameNumber)))
-    .get();
-
-  if (!frame) {
-    return c.json({ error: t("errorFrameNotFound") }, 404);
-  }
-
-  const currentValue = slot === 1 ? frame.player1Fouls : frame.player2Fouls;
-
-  if (currentValue === nextValue) {
-    return respondWithCurrentState(c, current.user!);
-  }
-
-  const now = new Date();
-  await db
-    .update(frames)
-    .set({
-      ...(slot === 1 ? { player1Fouls: nextValue } : { player2Fouls: nextValue }),
-      updatedAt: now,
-    })
-    .where(eq(frames.id, frame.id));
-
-  await db
-    .update(matches)
-    .set({
-      updatedAt: now,
-    })
-    .where(eq(matches.id, current.context!.match.id));
-
-  notifyMatchRoom(c, current.context!.match.id);
-  return respondWithCurrentState(c, current.user!);
+  const outcome = await sendMatchRoomCommand(c, current.context!.match.id, current.user!.id, {
+    type: "setFouls",
+    frameNumber,
+    slot,
+    value,
+  });
+  return respondToRoomCommand(c, current.user!, outcome);
 });
 
 app.post("/api/matches/current/reset", async (c) => {
@@ -2659,32 +2428,10 @@ app.post("/api/matches/current/reset", async (c) => {
     return current.response;
   }
 
-  const db = getDatabase(c);
-  const now = new Date();
-
-  await db.delete(frames).where(eq(frames.matchId, current.context!.match.id));
-  await db.insert(frames).values({
-    matchId: current.context!.match.id,
-    frameNumber: 1,
-    breakerSlot: null,
-    winnerSlot: null,
-    player1Fouls: 0,
-    player2Fouls: 0,
-    endedAt: null,
-    createdAt: now,
-    updatedAt: now,
+  const outcome = await sendMatchRoomCommand(c, current.context!.match.id, current.user!.id, {
+    type: "reset",
   });
-  await db
-    .update(matches)
-    .set({
-      targetWins: DEFAULT_TARGET_WINS,
-      archiveVersion: current.context!.match.archiveVersion + 1,
-      updatedAt: now,
-    })
-    .where(eq(matches.id, current.context!.match.id));
-
-  notifyMatchRoom(c, current.context!.match.id);
-  return respondWithCurrentState(c, current.user!);
+  return respondToRoomCommand(c, current.user!, outcome);
 });
 
 app.post("/api/matches/current/leave", async (c) => {
@@ -2705,23 +2452,6 @@ app.post("/api/matches/current/leave", async (c) => {
 
   await db.update(matches).set(updates).where(eq(matches.id, current.context!.match.id));
 
-  if (remainingSlot) {
-    await db
-      .update(frames)
-      .set({
-        breakerSlot: remainingSlot,
-        updatedAt: now,
-      })
-      .where(
-        and(
-          eq(frames.matchId, current.context!.match.id),
-          isNull(frames.winnerSlot),
-          eq(frames.player1Fouls, 0),
-          eq(frames.player2Fouls, 0),
-        ),
-      );
-  }
-
   await db
     .update(users)
     .set({
@@ -2730,16 +2460,11 @@ app.post("/api/matches/current/leave", async (c) => {
     })
     .where(eq(users.id, current.user!.id));
 
-  const updatedMatch = await db.select().from(matches).where(eq(matches.id, current.context!.match.id)).get();
-
-  if (updatedMatch && !updatedMatch.player1UserId && !updatedMatch.player2UserId) {
-    const frameRows = await db.select().from(frames).where(eq(frames.matchId, updatedMatch.id)).orderBy(asc(frames.frameNumber)).all();
-    await syncArchivedMatch(db, updatedMatch, frameRows, "closed", now);
-    await db.delete(frames).where(eq(frames.matchId, updatedMatch.id));
-    await db.delete(matches).where(eq(matches.id, updatedMatch.id));
+  if (remainingSlot) {
+    await notifyMatchRoomRegistry(c, current.context!.match.id, remainingSlot);
+  } else {
+    await closeMatchRoom(c, current.context!.match.id, "closed");
   }
-
-  notifyMatchRoom(c, current.context!.match.id);
 
   return c.json({
     user: serializeUser({ ...current.user!, currentMatchId: null, updatedAt: now }),
@@ -2777,3 +2502,52 @@ app.get("/api/matches/current/socket", async (c) => {
 });
 
 export default app;
+
+/**
+ * Belt-and-braces sweep on a Cron Trigger. Each room's alarm is the primary
+ * expiry path; this only catches registry rows the rooms could not close
+ * (for example after a data restore), plus expired sessions and legacy
+ * frame rows from the pre-Durable-Object schema.
+ */
+async function sweepStaleMatches(env: Bindings) {
+  const db = drizzle(env.DB);
+  const cutoff = new Date(Date.now() - MATCH_IDLE_TTL_MS);
+  const staleMatches = await db
+    .select()
+    .from(matches)
+    .where(
+      or(
+        and(isNull(matches.player1UserId), isNull(matches.player2UserId)),
+        lt(matches.updatedAt, cutoff),
+      ),
+    )
+    .all();
+
+  for (const match of staleMatches) {
+    const stub = env.MATCH_ROOM.get(env.MATCH_ROOM.idFromName(match.id));
+    const res = await stub
+      .fetch(matchRoomCloseUrl(match.id), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ status: "expired" }),
+      })
+      .catch(() => null);
+
+    if (!res || !res.ok) {
+      const now = new Date();
+      await db
+        .update(users)
+        .set({ currentMatchId: null, updatedAt: now })
+        .where(eq(users.currentMatchId, match.id));
+      await db.delete(frames).where(eq(frames.matchId, match.id));
+      await db.delete(matches).where(eq(matches.id, match.id));
+    }
+  }
+
+  await db.delete(sessions).where(lt(sessions.expiresAt, new Date()));
+  await db.run(sql`DELETE FROM frames WHERE match_id NOT IN (SELECT id FROM matches)`);
+}
+
+export const scheduled: ExportedHandler<Bindings>["scheduled"] = async (_event, env, _ctx) => {
+  await sweepStaleMatches(env);
+};
